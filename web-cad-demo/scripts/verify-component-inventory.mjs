@@ -1,0 +1,45 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {validateWorkbenchBundle} from '../gateway/workbench-bundle.mjs';
+import {hashFile,fileInventory} from '../gateway/frontend-release.mjs';
+import {validateCycloneDx} from './cyclonedx-validation.mjs';
+const root=path.resolve(import.meta.dirname,'..'),directory=path.resolve(process.env.COMPONENT_INVENTORY_REPORT||'.artifacts/component-inventory-final'),bundleDirectory=path.resolve(process.env.COMPONENT_INVENTORY_BUNDLE||'.artifacts/bundle-path-guards-final-releases/workbench-1794891367384-8af4301c-1926-491a-bc93-ef8ea89ae9ce'),schemaDirectory=path.resolve(process.env.COMPONENT_INVENTORY_SCHEMA||'.artifacts/component-inventory-schema'),output=path.resolve(process.env.COMPONENT_INVENTORY_VERIFICATION||'.artifacts/component-inventory-verification.json');
+if(fs.existsSync(output))throw Error('Verification receipt exists; nothing overwritten.');
+const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'cad-component-verification-')),checks=[];
+let completed=false;
+const json=file=>JSON.parse(fs.readFileSync(file,'utf8'));
+async function check(name,run){await run();checks.push(name);console.log('PASS '+name);}
+async function cli(args){const child=spawn(process.execPath,[path.join(root,'scripts/inventory-workbench-components.mjs'),...args],{cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe']});let diagnostic='';for(const stream of[child.stdout,child.stderr])stream.on('data',bytes=>diagnostic=(diagnostic+bytes).slice(-16384));const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',resolve);});return {code,diagnostic};}
+try{
+  const bundle=validateWorkbenchBundle(bundleDirectory),report=json(path.join(directory,'result.json')),inventory=json(path.join(directory,'inventory.json')),bom=json(path.join(directory,'bom.cdx.json')),reportBefore=fileInventory(directory),schemaBefore=fileInventory(schemaDirectory);
+  await check('report hashes and source bundle identity match exact sealed inputs',()=>{assert.equal(report.ok,true);assert.equal(report.inventorySha256,hashFile(path.join(directory,'inventory.json')));assert.equal(report.bomSha256,hashFile(path.join(directory,'bom.cdx.json')));assert.equal(report.manifestSha256,bundle.manifestSha256);assert.equal(inventory.bundle.manifestSha256,bundle.manifestSha256);assert.equal(report.bundle,bundle.releaseId);});
+  await check('every sealed file has exactly one ledger record and only known component owners',()=>{assert.deepEqual(inventory.artifacts.map(({file,bytes,sha256})=>({file,bytes,sha256})),bundle.files.map(({file,bytes,sha256})=>({file,bytes,sha256})));assert.equal(new Set(inventory.artifacts.map(a=>a.file)).size,bundle.files.length);const ids=new Set(inventory.components.map(c=>c.id));assert.equal(ids.size,inventory.components.length);for(const artifact of inventory.artifacts)if(artifact.component)assert.ok(ids.has(artifact.component));assert.equal(report.artifacts,inventory.artifacts.length);});
+  await check('every exported notice is a single-link content-addressed byte-for-byte copy',()=>{let bytes=0;for(const n of inventory.notices){const file=path.join(directory,'licenses',n.sha256+'.txt'),stat=fs.lstatSync(file);assert.equal(stat.isFile(),true);assert.equal(stat.isSymbolicLink(),false);assert.equal(stat.nlink,1);assert.equal(stat.size,n.bytes);assert.equal(hashFile(file),n.sha256);bytes+=stat.size;}assert.equal(bytes,report.noticeBytes);assert.equal(fs.readdirSync(path.join(directory,'licenses')).length,inventory.notices.length);assert.equal(report.notices,inventory.notices.length);});
+  await check('BOM has exact component identities and explicitly incomplete composition',()=>{assert.deepEqual(bom.components.map(c=>c['bom-ref']),inventory.components.map(c=>c.id));assert.equal(bom.dependencies,undefined);assert.equal(bom.compositions[0].aggregate,'incomplete');assert.equal(inventory.qualification,'incomplete-not-release-approved');assert.equal(bundle.scope.thirdPartyLicenseAudit,'incomplete');assert.ok(inventory.gaps.some(g=>g.code==='FRONTEND_COMPILED_MODULE_GRAPH_NOT_RECORDED'));assert.equal(report.components,inventory.components.length);});
+  await check('official pinned schema validates the real generated BOM with documented adapter',()=>{const v=validateCycloneDx(bom,schemaDirectory);assert.deepEqual(v,report.cycloneDx);assert.equal(v.annotationAdaptation.removed,33);});
+  for(const [name,change]of[
+    ['invalid component kind',b=>b.components[0].type='imaginary'],
+    ['unknown top-level property',b=>b.notInSchema=true],
+    ['invalid timestamp',b=>b.metadata.timestamp='2026-02-31T00:00:00Z'],
+    ['invalid hash',b=>b.metadata.component.hashes=[{alg:'SHA-256',content:'wrong'}]],
+    ['invalid composition',b=>b.compositions[0].aggregate='maybe'],
+    ['missing component name',b=>delete b.components[0].name]
+  ])await check('real schema rejects '+name,()=>{const bad=structuredClone(bom);change(bad);assert.throws(()=>validateCycloneDx(bad,schemaDirectory),/schema validation failed/);});
+  const base=['--bundle',bundleDirectory,'--schema-dir',schemaDirectory];
+  for(const [name,args,target,pattern]of[
+    ['unknown command-line option',[...base,'--output',path.join(scratch,'unknown'),'--unknown','x'],path.join(scratch,'unknown'),/Required:/],
+    ['output inside the sealed bundle',[...base,'--output',path.join(bundleDirectory,'not-an-output')],path.join(bundleDirectory,'not-an-output'),/overlaps an input/],
+    ['output inside schema material',[...base,'--output',path.join(schemaDirectory,'not-an-output')],path.join(schemaDirectory,'not-an-output'),/overlaps an input/],
+    ['drive-relative output spelling',[...base,'--output','D:relative'],null,/drive-relative|absolute|ambiguous/i],
+    ['missing option value',[...base,'--output','--msys-root','C:/msys64'],null,/Required:/]
+  ])await check('actual CLI refuses '+name+' before creating output',async()=>{const r=await cli(args);assert.equal(r.code,1,r.diagnostic);assert.match(r.diagnostic,pattern);if(target)assert.equal(fs.existsSync(target),false);});
+  await check('existing report is never overwritten',async()=>{const r=await cli([...base,'--output',directory]);assert.equal(r.code,1);assert.match(r.diagnostic,/output exists/);assert.deepEqual(fileInventory(directory),reportBefore);});
+  await check('self-consistent substitute schemas are refused before output creation',async()=>{const schemas=path.join(scratch,'substituted-schema');fs.mkdirSync(schemas);const files=['bom-1.6.schema.json','spdx.schema.json','jsf-0.82.schema.json'].map(file=>{const bytes=Buffer.from('{}');fs.writeFileSync(path.join(schemas,file),bytes);return {file,url:'https://cyclonedx.org/schema/'+file,bytes:2,sha256:createHash('sha256').update(bytes).digest('hex')};});fs.writeFileSync(path.join(schemas,'schema-input.json'),JSON.stringify({format:'web-cad-cyclonedx-schema-input',version:1,files}));const target=path.join(scratch,'substituted-output'),r=await cli(['--bundle',bundleDirectory,'--schema-dir',schemas,'--output',target]);assert.equal(r.code,1,r.diagnostic);assert.match(r.diagnostic,/pinned reviewed/);assert.equal(fs.existsSync(target),false);});
+  await check('without a local package database native origins remain unresolved instead of guessed',async()=>{const target=path.join(scratch,'no-package-database'),r=await cli([...base,'--output',target]);assert.equal(r.code,0,r.diagnostic);const i=json(path.join(target,'inventory.json'));assert.equal(i.packageDatabase,null);assert.equal(i.qualification,'incomplete-not-release-approved');assert.equal(i.components.filter(c=>c.kind==='native-package').length,0);assert.equal(i.components.filter(c=>c.kind==='project-native').length,5);assert.equal(i.components.filter(c=>c.kind==='unmapped-native').length,222);});
+  await check('source bundle, schema inputs and report remain unchanged throughout verification',()=>{assert.equal(validateWorkbenchBundle(bundleDirectory).manifestSha256,bundle.manifestSha256);assert.deepEqual(fileInventory(directory),reportBefore);assert.deepEqual(fileInventory(schemaDirectory),schemaBefore);});
+  fs.writeFileSync(output,JSON.stringify({ok:true,passed:checks.length,checks,bundle:bundle.releaseId,manifestSha256:bundle.manifestSha256,reportInventorySha256:report.inventorySha256,qualification:inventory.qualification,sourceBundleUnchanged:true,reportUnchanged:true,paidProviderCalls:0,scope:'Component evidence and generated BOM validation only; not a legal review, build attestation, full runtime composition or release approval.'},null,2),{flag:'wx'});completed=true;console.log(JSON.stringify({ok:true,passed:checks.length,output}));
+}finally{if(completed){assert.equal(path.dirname(scratch),path.resolve(os.tmpdir()));assert.match(path.basename(scratch),/^cad-component-verification-/);fs.rmSync(scratch,{recursive:true,force:true});}else console.error('Retained evidence verifier scratch: '+scratch);}

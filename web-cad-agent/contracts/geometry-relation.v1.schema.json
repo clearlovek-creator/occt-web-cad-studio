@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://web-cad-demo.local/contracts/geometry-relation.v1.schema.json",
+  "title": "Web CAD geometry relation result",
+  "type": "object",
+  "required": ["protocolVersion", "bodyA", "bodyB", "distance", "tolerance", "relation", "commonVolume", "source", "exact"],
+  "properties": {
+    "protocolVersion": { "const": 1 },
+    "documentId": { "type": "string" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "bodyA": { "type": "string", "minLength": 1 },
+    "bodyB": { "type": "string", "minLength": 1 },
+    "distance": { "type": "number", "minimum": 0 },
+    "tolerance": { "type": "number", "minimum": 0 },
+    "relation": { "enum": ["disjoint", "touching", "intersects", "contains", "inside"] },
+    "commonVolume": { "type": "number", "minimum": 0 },
+    "innerSolution": { "type": "boolean" },
+    "source": { "enum": ["occt-brep", "aabb-derived"] },
+    "exact": { "type": "boolean" },
+    "closestPoints": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "array", "prefixItems": [{ "type": "number" }, { "type": "number" }, { "type": "number" }], "minItems": 3, "maxItems": 3 }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Web CAD Gateway Spatial Query v1",
+  "type": "object",
+  "required": ["revision", "status", "scope", "units", "coordinateSystemId"],
+  "properties": {
+    "revision": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["empty", "complete", "partial", "unavailable"]},
+    "scope": {"enum": ["geometry-tree", "body", "variables", "coordinates", "materials", "history", "properties", "property-types"]},
+    "units": {"const": "mm"},
+    "coordinateSystemId": {"type": "string", "minLength": 1},
+    "bounds": {"$ref": "#/$defs/bounds"},
+    "center": {"$ref": "#/$defs/vector"},
+    "size": {"$ref": "#/$defs/vector"},
+    "obb": {"$ref": "#/$defs/obb"},
+    "relations": {"type": "array", "items": {"$ref": "#/$defs/relation"}}
+  },
+  "$defs": {
+    "vector": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3},
+    "bounds": {"type": "object", "required": ["min", "max"], "properties": {"min": {"$ref": "#/$defs/vector"}, "max": {"$ref": "#/$defs/vector"}}, "additionalProperties": false},
+    "obb": {"type": "object", "required": ["center", "axes", "halfSizes", "source", "exact"], "properties": {"center": {"$ref": "#/$defs/vector"}, "axes": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/vector"}}, "halfSizes": {"$ref": "#/$defs/vector"}, "source": {"enum": ["aabb-derived", "occt-exact"]}, "exact": {"type": "boolean"}}, "additionalProperties": false},
+    "relation": {"type": "object", "required": ["bodyA", "bodyB", "relation", "gap", "distance", "source", "exact"], "properties": {"bodyA": {"type": "string"}, "bodyB": {"type": "string"}, "relation": {"enum": ["separated", "touching", "bounds-overlap"]}, "possibleIntersection": {"type": "boolean"}, "gap": {"type": "number"}, "distance": {"type": "number"}, "source": {"const": "aabb"}, "exact": {"const": false}, "axisOverlap": {"$ref": "#/$defs/vector"}, "centerDelta": {"$ref": "#/$defs/vector"}}, "additionalProperties": true}
+  },
+  "additionalProperties": true
+}

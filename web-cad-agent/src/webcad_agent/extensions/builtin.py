@@ -1,0 +1,341 @@
+from __future__ import annotations
+
+from typing import Any
+
+from ..tools.spec import ToolSpec
+
+
+def provide_tools() -> list[ToolSpec]:
+    return [
+        ToolSpec(
+            name="core.document.summary",
+            gateway_operation="document.summary",
+            description="Read the current document summary.",
+            side_effect="read",
+            allowed_stages={"read", "planning", "verify"},
+        ),
+        ToolSpec(
+            name="core.document.view", gateway_operation="document.view", description="Read paged document geometry view.",
+            side_effect="read", allowed_stages={"read", "planning", "verify"},
+        ),
+        ToolSpec(
+            name="core.property.list", gateway_operation="property.list", description="List document properties.",
+            side_effect="read", allowed_stages={"read", "planning", "verify"},
+        ),
+        ToolSpec(
+            name="core.geometry.measure",
+            gateway_operation="geometry.measure",
+            description="Measure a Body, Face, or Edge.",
+            side_effect="read",
+            allowed_stages={"read", "planning", "verify"},
+            verifier="measurement",
+        ),
+        ToolSpec(
+            name="core.geometry.relation",
+            gateway_operation="geometry.relation",
+            description="Compute exact OCCT BRep distance and relation between two Bodies.",
+            input_schema={"type": "object", "required": ["bodyA", "bodyB"],
+                          "properties": {"bodyA": {"type": "string", "minLength": 1},
+                                         "bodyB": {"type": "string", "minLength": 1},
+                                         "tolerance": {"type": "number", "minimum": 0, "maximum": 1}}},
+            side_effect="read", allowed_stages={"read", "planning", "verify", "execute"}, verifier="relation",
+            parameter_units={"tolerance": "mm"}, verification_contract={"kind": "occt_brep_relation"},
+        ),
+        ToolSpec(
+            name="core.geometry.check",
+            gateway_operation="geometry.check",
+            description="Validate a Body shape.",
+            side_effect="read",
+            allowed_stages={"read", "verify"},
+            verifier="shape_valid",
+        ),
+        ToolSpec(
+            name="core.geometry.create_box",
+            gateway_operation="primitive.box",
+            description="Create one solid Box.",
+            input_schema={
+                "type": "object",
+                "required": ["width", "depth", "height"],
+                "properties": {
+                    "width": {"type": "number", "exclusiveMinimum": 0},
+                    "depth": {"type": "number", "exclusiveMinimum": 0},
+                    "height": {"type": "number", "exclusiveMinimum": 0},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "z": {"type": "number"},
+                },
+            },
+            side_effect="write",
+            risk_level="medium",
+            allowed_stages={"execute"},
+            supports_preview=True,
+            verifier="box_geometry",
+            parameter_units={"width": "mm", "depth": "mm", "height": "mm", "x": "mm", "y": "mm", "z": "mm"},
+            verification_contract={"kind": "expected_geometry", "coordinateSystem": "global"},
+        ),
+        ToolSpec(
+            name="core.transform.translate",
+            gateway_operation="transform.translate",
+            description="Translate one Body.",
+            input_schema={"type": "object", "required": ["bodyId", "dx", "dy", "dz"]},
+            side_effect="write",
+            risk_level="medium",
+            allowed_stages={"execute"},
+            supports_preview=True,
+            verifier="translation",
+            parameter_units={"dx": "mm", "dy": "mm", "dz": "mm"},
+        ),
+        ToolSpec(
+            name="core.geometry.create_cylinder",
+            gateway_operation="primitive.cylinder",
+            description="Create one solid cylinder.",
+            input_schema={
+                "type": "object",
+                "required": ["radius", "height"],
+                "properties": {
+                    "radius": {"type": "number", "exclusiveMinimum": 0},
+                    "height": {"type": "number", "exclusiveMinimum": 0},
+                    "x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"},
+                    "label": {"type": "string"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="cylinder_geometry",
+            parameter_units={"radius": "mm", "height": "mm", "x": "mm", "y": "mm", "z": "mm"},
+        ),
+        ToolSpec(
+            name="core.boolean.cut",
+            gateway_operation="boolean.cut",
+            description="Subtract toolBody from targetBody.",
+            input_schema={"type": "object", "required": ["targetBody", "toolBody"]},
+            side_effect="write", risk_level="high", allowed_stages={"execute"},
+            supports_preview=True, verifier="shape_valid",
+        ),
+        ToolSpec(
+            name="core.boolean.fuse", gateway_operation="boolean.fuse", description="Fuse two solid bodies.",
+            input_schema={"type": "object", "required": ["targetBody", "toolBody"]},
+            side_effect="write", risk_level="high", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+        ),
+        ToolSpec(
+            name="core.boolean.common", gateway_operation="boolean.common", description="Compute the common solid of two bodies.",
+            input_schema={"type": "object", "required": ["targetBody", "toolBody"]},
+            side_effect="write", risk_level="high", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+        ),
+        ToolSpec(
+            name="core.geometry.create_cone", gateway_operation="primitive.cone", description="Create one solid cone.",
+            input_schema={"type": "object", "required": ["radius1", "radius2", "height"]},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True, verifier="cone_geometry",
+            parameter_units={"radius1": "mm", "radius2": "mm", "height": "mm"},
+        ),
+        ToolSpec(
+            name="core.geometry.create_sphere", gateway_operation="primitive.sphere", description="Create one solid sphere.",
+            input_schema={"type": "object", "required": ["radius"]},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True, verifier="sphere_geometry",
+            parameter_units={"radius": "mm"},
+        ),
+        ToolSpec(
+            name="core.geometry.create_torus", gateway_operation="primitive.torus", description="Create one solid torus.",
+            input_schema={"type": "object", "required": ["majorRadius", "minorRadius"]},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True, verifier="torus_geometry",
+            parameter_units={"majorRadius": "mm", "minorRadius": "mm"},
+        ),
+        ToolSpec(
+            name="core.transform.rotate", gateway_operation="transform.rotate", description="Rotate one Body around an explicit axis.",
+            input_schema={"type": "object", "required": ["bodyId", "axis", "angle"]},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+            parameter_units={"angle": "deg"},
+        ),
+        ToolSpec(
+            name="core.transform.scale", gateway_operation="transform.scale", description="Scale one Body by an explicit factor.",
+            input_schema={"type": "object", "required": ["bodyId", "factor"]},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+            parameter_units={"factor": "dimensionless"},
+        ),
+        ToolSpec(
+            name="core.detail.fillet", gateway_operation="detail.fillet", description="Apply a fillet to explicitly resolved edges.",
+            input_schema={"type": "object", "required": ["bodyId", "edgeIds", "radius"]},
+            side_effect="write", risk_level="high", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+            parameter_units={"radius": "mm"}, verification_contract={"kind": "feature", "operation": "detail.fillet"},
+        ),
+        ToolSpec(
+            name="core.detail.chamfer", gateway_operation="detail.chamfer", description="Apply a chamfer to explicitly resolved edges.",
+            input_schema={"type": "object", "required": ["bodyId", "edgeIds", "distance"]},
+            side_effect="write", risk_level="high", allowed_stages={"execute"}, supports_preview=True, verifier="shape_valid",
+            parameter_units={"distance": "mm"}, verification_contract={"kind": "feature", "operation": "detail.chamfer"},
+        ),
+        ToolSpec(
+            name="core.pattern.linear", gateway_operation="pattern.linear",
+            description="Create a linear pattern from one explicitly resolved Body.",
+            input_schema={
+                "type": "object", "required": ["bodyId", "count", "spacing", "directionX", "directionY", "directionZ"],
+                "properties": {
+                    "bodyId": {"type": "string", "minLength": 1},
+                    "count": {"type": "integer", "minimum": 2, "maximum": 100},
+                    "spacing": {"type": ["number", "string"]},
+                    "directionX": {"type": "number"}, "directionY": {"type": "number"},
+                    "directionZ": {"type": "number"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="operation_ack",
+            parameter_units={"spacing": "mm"},
+            verification_contract={"kind": "feature", "operation": "pattern.linear"},
+        ),
+        ToolSpec(
+            name="core.pattern.circular", gateway_operation="pattern.circular",
+            description="Create a circular pattern from one explicitly resolved Body.",
+            input_schema={
+                "type": "object", "required": ["bodyId", "count", "angleDegrees", "axisX", "axisY", "axisZ"],
+                "properties": {
+                    "bodyId": {"type": "string", "minLength": 1},
+                    "count": {"type": "integer", "minimum": 2, "maximum": 100},
+                    "angleDegrees": {"type": ["number", "string"]},
+                    "originX": {"type": "number"}, "originY": {"type": "number"}, "originZ": {"type": "number"},
+                    "axisX": {"type": "number"}, "axisY": {"type": "number"}, "axisZ": {"type": "number"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="operation_ack", parameter_units={"angleDegrees": "deg"},
+            verification_contract={"kind": "feature", "operation": "pattern.circular"},
+        ),
+        ToolSpec(
+            name="core.pattern.rectangular", gateway_operation="pattern.rectangular",
+            description="Create a rectangular two-direction pattern from one Body.",
+            input_schema={
+                "type": "object", "required": ["bodyId", "countX", "countY", "spacingX", "spacingY"],
+                "properties": {
+                    "bodyId": {"type": "string", "minLength": 1},
+                    "countX": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "countY": {"type": "integer", "minimum": 1, "maximum": 20},
+                    "spacingX": {"type": ["number", "string"]}, "spacingY": {"type": ["number", "string"]},
+                    "directionX": {"type": "number"}, "directionY": {"type": "number"}, "directionZ": {"type": "number"},
+                    "direction2X": {"type": "number"}, "direction2Y": {"type": "number"}, "direction2Z": {"type": "number"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="operation_ack", parameter_units={"spacingX": "mm", "spacingY": "mm"},
+            verification_contract={"kind": "feature", "operation": "pattern.rectangular"},
+        ),
+        ToolSpec(
+            name="core.pattern.mirror", gateway_operation="pattern.mirror",
+            description="Mirror one Body about an explicit plane normal and origin.",
+            input_schema={
+                "type": "object", "required": ["bodyId", "normalX", "normalY", "normalZ"],
+                "properties": {
+                    "bodyId": {"type": "string", "minLength": 1},
+                    "originX": {"type": "number"}, "originY": {"type": "number"}, "originZ": {"type": "number"},
+                    "normalX": {"type": "number"}, "normalY": {"type": "number"}, "normalZ": {"type": "number"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="operation_ack", parameter_units={"originX": "mm", "originY": "mm", "originZ": "mm"},
+            verification_contract={"kind": "feature", "operation": "pattern.mirror"},
+        ),
+        ToolSpec(
+            name="core.project.set_variable", gateway_operation="variable.set",
+            description="Create or update a typed project variable.",
+            input_schema={
+                "type": "object", "required": ["name", "type", "expression"],
+                "properties": {"name": {"type": "string", "minLength": 1}, "type": {"type": "string", "minLength": 1},
+                               "expression": {"type": "string", "minLength": 1}},
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"},
+            supports_preview=True, verifier="operation_ack", verification_contract={"kind": "metadata", "key": "variable"},
+        ),
+        ToolSpec(
+            name="core.project.set_coordinate", gateway_operation="coordinate.set",
+            description="Create or update a project coordinate system.",
+            input_schema={
+                "type": "object", "required": ["id", "name", "kind", "origin", "xAxis", "yAxis"],
+                "properties": {
+                    "id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+                    "kind": {"type": "string", "minLength": 1},
+                    "origin": {"type": "array", "items": {"type": "number"}},
+                    "xAxis": {"type": "array", "items": {"type": "number"}},
+                    "yAxis": {"type": "array", "items": {"type": "number"}},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", parameter_units={"origin": "mm"},
+            verification_contract={"kind": "metadata", "key": "coordinate"},
+        ),
+        ToolSpec(
+            name="core.project.set_material", gateway_operation="material.set",
+            description="Create or update a named engineering material.",
+            input_schema={
+                "type": "object", "required": ["name"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "category": {"type": "string", "enum": ["vacuum", "dielectric", "conductor"]},
+                    "relativePermittivity": {"type": ["number", "string"]},
+                    "conductivity": {"type": ["number", "string"]},
+                    "color": {"type": "string"}, "customProperties": {"type": "object"},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "material"},
+        ),
+        ToolSpec(
+            name="core.project.assign_material", gateway_operation="body.update",
+            description="Assign an existing material to an explicitly resolved Body.",
+            input_schema={"type": "object", "required": ["bodyId", "material"],
+                          "properties": {"bodyId": {"type": "string", "minLength": 1}, "material": {"type": "string", "minLength": 1}}},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "body.material"},
+        ),
+        ToolSpec(
+            name="core.project.set_property", gateway_operation="property.set",
+            description="Set a typed property on a Body, Face, or Edge.",
+            input_schema={
+                "type": "object", "required": ["kind", "bodyId", "key", "type", "value"],
+                "properties": {
+                    "kind": {"type": "string", "enum": ["body", "face", "edge"]},
+                    "bodyId": {"type": "string", "minLength": 1}, "topologyId": {"type": "string"},
+                    "key": {"type": "string", "minLength": 1}, "type": {"type": "string", "minLength": 1},
+                    "value": {},
+                },
+            },
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "property"},
+        ),
+        ToolSpec(
+            name="core.project.delete_property", gateway_operation="property.delete",
+            description="Delete a typed property from a Body, Face, or Edge.",
+            input_schema={"type": "object", "required": ["kind", "bodyId", "key"],
+                          "properties": {"kind": {"type": "string", "enum": ["body", "face", "edge"]},
+                                         "bodyId": {"type": "string", "minLength": 1}, "topologyId": {"type": "string"},
+                                         "key": {"type": "string", "minLength": 1}}},
+            side_effect="destructive", risk_level="high", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "property.delete"},
+        ),
+        ToolSpec(
+            name="core.property_type.create", gateway_operation="property.type.create",
+            description="Create a validated custom property type schema.",
+            input_schema={"type": "object", "required": ["key", "name", "targetScope", "association", "fields"],
+                          "properties": {"key": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+                                         "description": {"type": "string"}, "targetScope": {"type": "string"},
+                                         "association": {"type": "string"}, "fields": {"type": "array"}}},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "property.type"},
+        ),
+        ToolSpec(
+            name="core.property_instance.create", gateway_operation="property.instance.create",
+            description="Create an instance of a custom property type.",
+            input_schema={"type": "object", "required": ["name", "value"],
+                          "properties": {"typeId": {"type": "string"}, "typeKey": {"type": "string"},
+                                         "name": {"type": "string", "minLength": 1}, "value": {}, "target": {"type": "object"}}},
+            side_effect="write", risk_level="medium", allowed_stages={"execute"}, supports_preview=True,
+            verifier="operation_ack", verification_contract={"kind": "metadata", "key": "property.instance"},
+        ),
+    ]
+
+
+def provide_skills() -> list[dict[str, Any]]:
+    return [
+        {
+            "skill_id": "core.geometry.create_box_verified",
+            "version": "1",
+            "kind": "deterministic",
+            "required_tools": ["core.geometry.create_box", "core.geometry.measure", "core.geometry.check"],
+        }
+    ]

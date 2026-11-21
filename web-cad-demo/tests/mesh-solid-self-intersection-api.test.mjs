@@ -1,0 +1,24 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {randomUUID} from 'node:crypto';
+import {createMeshSelfIntersectionFixture} from './helpers/mesh-self-intersection-fixture.mjs';import {gatedGeometryGateway} from './helpers/gated-geometry-gateway.mjs';
+test('real folded STEP diagnostics identify the bad source, preserve face properties and geometry, and start no Gmsh',async()=>{const fixture=createMeshSelfIntersectionFixture(),data=fs.mkdtempSync(path.join(os.tmpdir(),'cad-solid-self-api-'));let f,ok=false;try{
+  f=await gatedGeometryGateway(data,{GEOMETRY_WORKER_TIMEOUT_MS:'60000'});const state=await f.cad('document.summary'),command={protocolVersion:1,operation:'step.import',documentId:'default',requestId:randomUUID(),fileName:'folded-solid.step',expectedBytes:fixture.step.length,baseRevision:state.revision,baseStateToken:state.stateToken},reserved=await f.post('/documents/default/imports/step/tasks',{command});assert.equal(reserved.status,201,JSON.stringify(reserved));const response=await fetch(f.api+'/documents/default/imports/step',{method:'POST',headers:{'Content-Type':'application/step','X-Cad-Task-Id':reserved.value.modelingTask.taskId,'X-Request-Id':command.requestId,'X-File-Name':encodeURIComponent(command.fileName),'X-Base-Revision':String(command.baseRevision),'X-Base-State-Token':command.baseStateToken},body:fixture.step}),imported=await response.json();assert.equal(imported.ok,true,JSON.stringify(imported));assert.equal(imported.bodyCount,1);const badId=imported.bodyMetadata[0].bodyId;
+  await f.cad('primitive.box',{width:2,depth:2,height:2,x:5});const presentation=await f.cad('body.presentation',{}, {bodyId:badId}),faceId=presentation.triangleFaceIds[0],type=await f.cad('property.type.create',{key:'DirtyBoundary',association:'required',targetScope:'face',fields:[{key:'enabled',type:'bool'}]});await f.cad('property.instance.create',{typeId:type.type.typeId,name:'Folded face',value:{enabled:true},target:{kind:'face',bodyId:badId,topologyId:faceId}});const before=await f.cad('document.summary'),properties=(await f.cad('property.instance.list')).instances;
+  for(const repairMode of ['strict','conservative']){const offset=f.events.length,failed=await f.post('/documents/default/mesh/jobs',{kind:'preparation',repairMode,deepCheck:true});assert.equal(failed.value.ok,false,JSON.stringify(failed));assert.equal(failed.value.code,'MESH_REPAIR_DIAGNOSTIC_FAILED');assert.equal(failed.value.meshJob.state,'failed');const report=await f.get('/mesh/jobs/'+failed.value.meshJob.jobId);assert.equal(report.preparation.diagnostics.status,'blocked');const bad=report.preparation.diagnostics.bodies.find(row=>row.bodyId===badId);assert.ok(bad.before.issues.some(issue=>issue.code==='SELF_INTERSECTION'&&issue.severity==='error'&&issue.target?.bodyId===badId));assert.equal(report.mesh,undefined);assert.equal(f.events.slice(offset).some(event=>event.type==='fixture.mesh-start'),false);assert.equal((await f.cad('document.summary')).stateToken,before.stateToken);assert.deepEqual((await f.cad('property.instance.list')).instances,properties);}
+  const failedJobs=(await f.get('/documents/default/mesh/jobs')).jobs;
+  const saved=await fetch(f.api+'/documents/default/project/save',{method:'POST'});
+  assert.equal(saved.status,200);const bytes=Buffer.from(await saved.arrayBuffer());
+  const opened=await fetch(f.api+'/documents/reopened/project/open',{method:'POST',headers:{'content-type':'application/vnd.webcad.project'},body:bytes});
+  assert.equal(opened.status,200,await opened.text());
+  assert.deepEqual((await f.cad('property.instance.list',{}, {},'reopened')).instances,properties);
+  assert.equal((await f.cad('document.summary',{}, {},'reopened')).bodyCount,2);
+  for(const job of failedJobs){
+    const report=await f.get('/mesh/jobs/'+job.jobId);
+    const target=report.preparation.diagnostics.bodies.find(row=>row.bodyId===badId).before.issues.find(issue=>issue.code==='SELF_INTERSECTION'&&issue.target?.kind==='face').target;
+    const measured=await f.cad('geometry.measure',{}, {bodyId:target.bodyId,selectionType:'face',selectionId:target.topologyId},'reopened');
+    assert.ok(measured.area>0,'Diagnostic must identify a real original face after project reopen');
+  }
+  const reopenedFailure=await f.post('/documents/reopened/mesh/jobs',{kind:'preparation',repairMode:'strict',deepCheck:true});
+  assert.equal(reopenedFailure.value.code,'MESH_REPAIR_DIAGNOSTIC_FAILED');
+  assert.equal((await f.cad('document.summary')).stateToken,before.stateToken);
+  ok=true;
+}finally{if(f)assert.equal(await f.stop(),0);if(ok){fixture.cleanup();assert.equal(path.dirname(data),path.resolve(os.tmpdir()));assert.match(path.basename(data),/^cad-solid-self-api-/);fs.rmSync(data,{recursive:true,force:true});}else console.error('Retained folded STEP evidence: '+fixture.root+'; '+data);}});

@@ -1,0 +1,25 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import path from "node:path";
+import {spawnSync} from "node:child_process";
+import {fileURLToPath} from "node:url";
+test("native naming rejects symmetric ambiguity and survives swapped results and large coordinate changes",()=>{
+  const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"..");
+  const worker=process.env.GEOMETRY_WORKER_PATH || path.join(root,"geometry-worker/build/occt_geometry_worker.exe");
+  const executable=path.join(path.dirname(worker),"topology_naming_tests.exe");
+  const env={...process.env};const inherited=env.Path || env.PATH || "";delete env.Path;delete env.PATH;
+  env.PATH=[path.resolve(root,"../install-mingw-ucrt64/win64/gcc/bin"),"C:/msys64/ucrt64/bin",inherited].join(path.delimiter);
+  const result=spawnSync(executable,[],{env,windowsHide:true,encoding:"utf8",timeout:15000});
+  assert.equal(result.status,0,`${result.error?.message || ""}\n${result.stderr}\n${result.stdout}\nRun npm run build:worker to build the native regression target.`);
+  assert.match(result.stdout,/cross-Body identity/);assert.match(result.stdout,/symmetric duplicate/);assert.match(result.stdout,/large dimension/);
+  assert.match(result.stdout,/persistent selection survives changed edge enumeration/);
+  assert.match(result.stdout,/exact BRep selection excludes tessellation/);
+  assert.match(result.stdout,/incomplete persistent selections remain unresolved/);
+  assert.match(result.stdout,/imported input previews release temporary documents on success and failure/);
+  assert.match(result.stdout,/immutable STEP topology names bind exact source, whole part and distinct occurrence/);
+  assert.match(result.stdout,/bounded remote topology context distinguishes real repeated Face\/Edge branches without geometric guessing/);
+  assert.match(result.stdout,/remote context budgets, incomplete proof and duplicate destinations remain unresolved and read-only/);
+  assert.match(result.stdout,/persistent remote Face\/Edge selections follow reordered real solids and drive an actual fillet/);
+  assert.match(result.stdout,/remote selectors retain legacy exact behavior, reject missing and corrupt proof, enforce budgets and survive persistence/);
+  assert.match(result.stdout,/bulk archived Face\/Edge recovery shares bounded remote evidence, restores proven properties and retains old archive compatibility/);
+});

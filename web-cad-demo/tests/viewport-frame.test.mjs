@@ -1,0 +1,19 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {importTestTypeScript} from './helpers/import-typescript.mjs';
+const {createViewportFrame}=await importTestTypeScript('../app/model/viewport-frame.ts',import.meta.url);
+function fixture(draw=()=>false){let id=0;const pending=new Map(),cancelled=new Map();let frames;
+  frames=createViewportFrame({draw:time=>draw(time,frames),requestFrame:cb=>{const handle=id++;pending.set(handle,cb);return handle;},cancelFrame:handle=>{cancelled.set(handle,pending.get(handle));pending.delete(handle);}});
+  const tick=()=>{const [handle,cb]=pending.entries().next().value;pending.delete(handle);cb(handle*16);};
+  return {frames,pending,cancelled,tick};
+}
+test('a static scene remains idle until invalidated and never starts a continuous loop',()=>{let draws=0;const f=fixture(()=>{draws++;});assert.equal(f.pending.size,0);f.frames.invalidate();f.tick();assert.equal(draws,1);assert.equal(f.pending.size,0);assert.deepEqual(f.frames.status(),{pending:false,dirty:false,paused:false,disposed:false});});
+test('many scene and resize updates coalesce into one callback, including handle zero',()=>{let draws=0;const f=fixture(()=>{draws++;});for(let i=0;i<1000;i++)f.frames.invalidate();assert.equal(f.pending.size,1);f.tick();assert.equal(draws,1);});
+test('damping continues only while controls report an actual change, then settles',()=>{let draws=0;const f=fixture(()=>++draws<4);f.frames.invalidate();while(f.pending.size)f.tick();assert.equal(draws,4);assert.equal(f.frames.status().pending,false);});
+test('an invalidation emitted during drawing is preserved without duplicate callbacks',()=>{let draws=0;const f=fixture((_,frames)=>{draws++;if(draws===1){frames.invalidate();frames.invalidate();return true;}});f.frames.invalidate();f.tick();assert.equal(f.pending.size,1);f.tick();assert.equal(draws,2);assert.equal(f.pending.size,0);});
+test('hidden or context-lost views cancel pending work and coalesce updates until resumed',()=>{let draws=0;const f=fixture(()=>{draws++;});f.frames.invalidate();f.frames.setPaused(true);assert.equal(f.pending.size,0);for(let i=0;i<100;i++)f.frames.invalidate();assert.equal(draws,0);assert.equal(f.pending.size,0);f.frames.setPaused(false);f.tick();assert.equal(draws,1);assert.equal(f.pending.size,0);});
+test('a late cancelled callback cannot consume or duplicate the new visible frame',()=>{let draws=0;const f=fixture(()=>{draws++;});f.frames.invalidate();f.frames.setPaused(true);const late=[...f.cancelled.values()][0];f.frames.setPaused(false);late(0);assert.equal(draws,0);assert.equal(f.pending.size,1);f.tick();assert.equal(draws,1);});
+test('dispose removes owned callbacks and rejects invalidation, resume and late delivery',()=>{let draws=0;const f=fixture(()=>{draws++;});f.frames.invalidate();f.frames.dispose();for(const cb of f.cancelled.values())cb(0);f.frames.invalidate();f.frames.setPaused(false);assert.equal(draws,0);assert.equal(f.pending.size,0);assert.equal(f.frames.status().disposed,true);});
+test('disposal or pausing from a draw never starts another damping callback',()=>{for(const action of ['dispose','setPaused']){const f=fixture((_,frames)=>{frames[action](true);return true;});f.frames.invalidate();f.tick();assert.equal(f.pending.size,0);}});
+test('a draw error is surfaced and does not create a failing recurring loop',()=>{const f=fixture(()=>{throw Error('draw failed');});f.frames.invalidate();assert.throws(f.tick,/draw failed/);assert.equal(f.pending.size,0);assert.equal(f.frames.status().pending,false);});
+test('a draw that invalidates before failing still cancels its newly queued callback',()=>{const f=fixture((_,frames)=>{frames.invalidate();throw Error('draw failed');});f.frames.invalidate();assert.throws(f.tick,/draw failed/);assert.equal(f.pending.size,0);assert.equal(f.frames.status().dirty,false);});

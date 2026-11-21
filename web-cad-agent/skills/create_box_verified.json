@@ -1,0 +1,16 @@
+{
+  "skills": [
+    {
+      "name": "example.geometry.create_box_verified",
+      "version": "1",
+      "provider": "example",
+      "description": "Create a Box and verify its bounds and volume.",
+      "prompt_template": "Create one Box from explicit width, depth and height, then verify geometry.",
+      "tool_names": ["core.geometry.create_box", "core.geometry.measure", "core.geometry.check"],
+      "input_schema": {
+        "type": "object",
+        "required": ["width", "depth", "height"]
+      }
+    }
+  ]
+}

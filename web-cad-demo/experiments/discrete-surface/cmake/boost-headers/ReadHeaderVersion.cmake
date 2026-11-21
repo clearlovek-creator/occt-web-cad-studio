@@ -1,0 +1,13 @@
+# An explicit header-only adapter, not a full Boost binary installation.
+if(NOT EXISTS "${CAD_RESEARCH_BOOST_INCLUDE}/boost/version.hpp")
+  message(FATAL_ERROR "The verified private Boost header tree is required")
+endif()
+file(STRINGS "${CAD_RESEARCH_BOOST_INCLUDE}/boost/version.hpp" _version REGEX "^#define BOOST_VERSION [0-9]+$")
+string(REGEX REPLACE "^#define BOOST_VERSION " "" _version "${_version}")
+if(NOT _version MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "Unsupported Boost version header")
+endif()
+math(EXPR _major "${_version} / 100000")
+math(EXPR _minor "(${_version} / 100) % 1000")
+math(EXPR _patch "${_version} % 100")
+set(Boost_VERSION "${_major}.${_minor}.${_patch}")

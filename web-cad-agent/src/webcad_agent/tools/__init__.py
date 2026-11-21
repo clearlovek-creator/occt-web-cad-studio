@@ -1,0 +1,1 @@
+"""Tool specifications and registry."""

@@ -1,0 +1,30 @@
+name: modeling-agent
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "web-cad-demo/modeling-agent/**"
+      - "web-cad-demo/.github/workflows/modeling-agent.yml"
+  pull_request:
+    paths:
+      - "web-cad-demo/modeling-agent/**"
+      - "web-cad-demo/.github/workflows/modeling-agent.yml"
+
+jobs:
+  python-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web-cad-demo/modeling-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install package
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+      - name: Unit and integration tests
+        run: python -m unittest discover -s tests -q
+      - name: Compile sources
+        run: python -m compileall -q src

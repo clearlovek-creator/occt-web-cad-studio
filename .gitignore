@@ -22,6 +22,8 @@
 !/tests/
 !/tools/
 !/.github/
+!/web-cad-demo/
+!/web-cad-agent/
 
 # data/ level: Ignore everything except tracked subdirectories
 /data/*

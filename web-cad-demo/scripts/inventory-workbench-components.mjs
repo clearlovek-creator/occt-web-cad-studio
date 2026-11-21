@@ -1,0 +1,22 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {validateWorkbenchBundle} from '../gateway/workbench-bundle.mjs';
+import {prepareWorkbenchBuildPaths} from '../gateway/workbench-build-paths.mjs';
+import {hashFile} from '../gateway/frontend-release.mjs';
+import {validateCycloneDx} from './cyclonedx-validation.mjs';
+import {buildComponentInventory,certifiedBundleReader,loadPacmanEvidence,toCycloneDx,gapLabels} from './workbench-component-inventory.mjs';
+const options={};for(let index=2;index<process.argv.length;index+=2){const name=process.argv[index],value=process.argv[index+1];if(!['--bundle','--output','--msys-root','--schema-dir'].includes(name)||!value||value.startsWith('--')||Object.hasOwn(options,name))throw Error('Required: --bundle --output --schema-dir; optional: --msys-root.');options[name]=value;}
+if(!options['--bundle']||!options['--output']||!options['--schema-dir'])throw Error('Bundle, output and exact schema input directory are required.');
+const root=path.resolve(import.meta.dirname,'..'),admission=prepareWorkbenchBuildPaths({workspace:root,frontendRoot:options['--bundle'],backendRoot:options['--bundle'],nodeSourceMaterial:options['--schema-dir'],outputRoot:options['--output']});if(options['--msys-root'])options['--msys-root']=admission.observeInputDirectory(options['--msys-root']);
+options['--bundle']=admission.paths.frontendRoot;options['--schema-dir']=admission.paths.nodeSourceMaterial;options['--output']=admission.paths.outputRoot;
+if(fs.existsSync(options['--output']))throw Error('Inventory output exists; nothing overwritten.');
+const bundle=validateWorkbenchBundle(options['--bundle']),read=certifiedBundleReader(bundle.directory,bundle.files),native=JSON.parse(read('backend/'+bundle.backend.releaseId+'/release.json')).native,names=new Set(Object.values(native.profiles).flatMap(profile=>profile.files.map(file=>file.file.toLowerCase())));
+const pacman=options['--msys-root']?loadPacmanEvidence(options['--msys-root'],names):null,inventory=buildComponentInventory({bundle,read,msysRoot:options['--msys-root'],pacman}),bom=toCycloneDx(inventory);
+const schemaValidation=validateCycloneDx(bom,options['--schema-dir']);
+validateWorkbenchBundle(bundle.directory);if(pacman){const after=loadPacmanEvidence(options['--msys-root'],names);if(JSON.stringify(after.proofs)!==JSON.stringify(pacman.proofs))throw Error('Package database changed during inventory.');}
+const noticeBytes=inventory.notices.reduce((total,notice)=>total+notice.bytes,0);if(noticeBytes>32*1024*1024)throw Error('Notice export exceeds 32 MiB.');
+admission.createOutputRoot();const output=options['--output'];fs.mkdirSync(path.join(output,'licenses'));for(const notice of inventory.notices){const bytes=Buffer.from(notice.text,'base64');fs.writeFileSync(path.join(output,'licenses',notice.sha256+'.txt'),bytes,{flag:'wx'});delete notice.text;}
+fs.writeFileSync(path.join(output,'inventory.json'),JSON.stringify(inventory,null,2),{flag:'wx'});fs.writeFileSync(path.join(output,'bom.cdx.json'),JSON.stringify(bom,null,2),{flag:'wx'});
+const counts={};for(const gap of inventory.gaps)counts[gap.code]=(counts[gap.code]||0)+1;
+const summary={ok:true,bundle:bundle.releaseId,manifestSha256:bundle.manifestSha256,components:inventory.components.length,artifacts:inventory.artifacts.length,notices:inventory.notices.length,gaps:counts,frontendComposition:inventory.frontendComposition,qualification:inventory.qualification,cycloneDx:schemaValidation,inventorySha256:hashFile(path.join(output,'inventory.json')),bomSha256:hashFile(path.join(output,'bom.cdx.json')),noticeBytes,sourceBundleUnchanged:true};fs.writeFileSync(path.join(output,'result.json'),JSON.stringify(summary,null,2),{flag:'wx'});
+const lines=['# 工作台组件与许可证据清单','','状态：未完成，不代表可对外发布。','',`组件 ${summary.components}；覆盖材料 ${summary.artifacts}；独立许可/声明文本 ${summary.notices}。`,'','CycloneDX 1.6 已按本次固定的官方 JSON Schema 验证；结构通过不是许可合规或来源完整证明。校验器仅接受本生成器所用的保守格式子集，详见 result.json 的 formatProfile。','','| 待核对项 | 数量 |','| --- | ---: |',...Object.entries(counts).map(([code,count])=>`| ${gapLabels[code]||code} | ${count} |`),'','本机包数据库加逐字节一致仅证明当前安装文件的对应，不是原始构建、包签名或源码交付证明。',inventory.frontendComposition?`已记录三类前端输出，${inventory.frontendComposition.chunkFiles} 个分块涉及 ${inventory.frontendComposition.packages} 个包；生成模块、非脚本资源及分块外脚本仍单列缺口。`:'前端锁文件不能当作所有锁定包均进入页面的证明；最终编译模块图仍待记录。','外部安装目录中的许可副本仅作为报告证据，没有写回不可变运行包。'];fs.writeFileSync(path.join(output,'SUMMARY_zh.md'),lines.join('\n'),{flag:'wx'});console.log(JSON.stringify(summary));

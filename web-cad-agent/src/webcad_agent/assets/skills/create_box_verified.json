@@ -1,0 +1,12 @@
+{
+  "skills": [
+    {
+      "name": "example.geometry.create_box_verified",
+      "version": "1",
+      "provider": "example",
+      "description": "Create a box and verify its dimensions.",
+      "tool_names": ["core.geometry.create_box", "core.geometry.measure", "core.geometry.check"],
+      "input_schema": {"type": "object", "required": ["width", "depth", "height"]}
+    }
+  ]
+}

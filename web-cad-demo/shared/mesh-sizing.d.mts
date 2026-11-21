@@ -1,0 +1,10 @@
+export type MeshSizingTarget={kind:'body'|'face';bodyId:string;bodyIdentity:string;topologyIdentity:string;topologyRevision:number;cadFaceId?:string};
+export type MeshSizing={version:1;globalSize:number;rules:{id:string;size:number;target:MeshSizingTarget;transitionDistance?:number}[]};
+export type MeshSizingReport={version:1;strategy:'min-restrict-v1';globalSize:number;rules:(MeshSizing['rules'][number]&{volumeTags:number[];surfaceTags:number[];transition?:{distance:number;sampling:100;basis:'source-surfaces-distance-v1'}})[]};
+export const MESH_SIZING_LIMITS:Readonly<{minSize:number;maxSize:number;maxRules:number}>;
+export function normalizeMeshSizing(value:unknown):MeshSizing|undefined;
+export function meshSizingTargetKey(target:MeshSizingTarget):string;
+export function meshSizingTargetCurrent(target:MeshSizingTarget,view:unknown):boolean;
+export function validateMeshSizingSource(sizing:MeshSizing|undefined,view:unknown):void;
+export function resolveMeshSizing(sizing:MeshSizing|undefined,manifest:unknown):{id:string;solidIndices:number[];faceIndices:number[]}[];
+export function validateMeshSizingReport(report:unknown,sizing:MeshSizing|undefined,mesh:unknown):void;

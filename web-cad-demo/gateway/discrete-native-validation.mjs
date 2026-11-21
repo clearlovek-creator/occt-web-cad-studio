@@ -1,0 +1,27 @@
+import {assertVolumePartitionInput,assertVolumePartitionResult,assertConstrainedVolumeInput,assertConstrainedVolumeResult} from './volume-partition-protocol.mjs';
+import {assertDiscreteTetraInput,assertDiscreteTetraResult,discreteTetraFailure,assertConstrainedDiscreteTetraInput,assertConstrainedDiscreteTetraResult,constrainedDiscreteTetraFailure} from './discrete-tetra-protocol.mjs';
+import {assertPatchedDiscreteTetraInput,assertPatchedDiscreteTetraResult,patchedDiscreteTetraFailure} from './patched-tetra-protocol.mjs';
+import {DISCRETE_VALIDATION_BYTES,discreteValidationHash,decodeDiscreteValidationBinary} from './discrete-validation-envelope.mjs';
+import {assertCheckpointInput,assertCheckpointResult,assertOptimizationCheckpointInput,assertCheckpointOptimizationResult,checkpointOptimizationFailure} from './mesh-checkpoint-protocol.mjs';
+import {assertPatchedCheckpointRequest,assertPatchedCheckpointResult,assertPatchedOptimizationInput,assertPatchedOptimizationResult,patchedOptimizationFailure} from './patched-checkpoint-protocol.mjs';
+const fault=()=>Object.assign(Error('离散校验操作、阶段或材料无效。'),{code:'MESH_VALIDATION_PROTOCOL_INVALID',retryableByModel:false});
+/** Closed, pure validator registry. Runs in the existing bounded artifact
+ * worker; no file paths, scripts, native execution or arbitrary function names. */
+export function validateDiscreteNativePacket(packet){
+  let snapshotSha256;
+  if(packet?.format==='web-cad-native-validation-binary'){const decoded=decodeDiscreteValidationBinary(packet);packet=decoded.packet;snapshotSha256=decoded.sha256;}
+  const checkpoint=packet?.operation==='mesh.discrete-checkpoint',optimize=packet?.operation==='mesh.discrete-optimize',patchedCheckpoint=packet?.operation==='mesh.discrete-patched-checkpoint',patchedOptimize=packet?.operation==='mesh.discrete-patched-optimize',isolated=checkpoint||optimize||patchedCheckpoint||patchedOptimize;
+  if(!packet||typeof packet!=='object'||Array.isArray(packet)||Object.keys(packet).some(key=>!['version','phase','operation','requestId','input','context','candidate'].includes(key))||packet.version!==1||!['input','result','failure'].includes(packet.phase)||!['volume.partition','volume.partition-constrained','mesh.discrete-tetra','mesh.discrete-constrained-tetra','mesh.discrete-patched-tetra','mesh.discrete-checkpoint','mesh.discrete-optimize','mesh.discrete-patched-checkpoint','mesh.discrete-patched-optimize'].includes(packet.operation)||typeof packet.requestId!=='string'||!(isolated?/^mesh-checkpoint-[a-f0-9-]{36}$/:/^(surface|tetra)-[a-f0-9-]{36}$/).test(packet.requestId)||Buffer.byteLength(JSON.stringify(packet))>(isolated?272*1024**2:DISCRETE_VALIDATION_BYTES))throw fault();
+  const sha256=snapshotSha256||discreteValidationHash(packet),constrainedVolume=packet.operation==='volume.partition-constrained',volume=packet.operation==='volume.partition'||constrainedVolume,constrained=packet.operation==='mesh.discrete-constrained-tetra',patched=packet.operation==='mesh.discrete-patched-tetra',candidate=packet.candidate;
+  if(volume)(constrainedVolume?assertConstrainedVolumeInput:assertVolumePartitionInput)(packet.input);else if(checkpoint||patchedCheckpoint)(patchedCheckpoint?assertPatchedCheckpointRequest:assertCheckpointInput)(packet.input,packet.context);else if(optimize||patchedOptimize)(patchedOptimize?assertPatchedOptimizationInput:assertOptimizationCheckpointInput)(packet.input,packet.context);else (patched?assertPatchedDiscreteTetraInput:constrained?assertConstrainedDiscreteTetraInput:assertDiscreteTetraInput)(packet.input,packet.context);
+  let failure;
+  if(packet.phase==='input'){if(candidate!==undefined)throw fault();}
+  else if(packet.phase==='result'){
+    if(volume)(constrainedVolume?assertConstrainedVolumeResult:assertVolumePartitionResult)(candidate,packet.input,packet.requestId);else if(checkpoint||patchedCheckpoint)(patchedCheckpoint?assertPatchedCheckpointResult:assertCheckpointResult)(candidate,packet.input,packet.requestId);else if(optimize||patchedOptimize)(patchedOptimize?assertPatchedOptimizationResult:assertCheckpointOptimizationResult)(candidate,packet.input,packet.requestId);else (patched?assertPatchedDiscreteTetraResult:constrained?assertConstrainedDiscreteTetraResult:assertDiscreteTetraResult)(candidate,packet.input,packet.requestId);
+  }else{
+    if(candidate?.ok!==false||candidate.protocolVersion!==1||candidate.requestId!==packet.requestId||candidate.service!==(volume?'cad-discrete-surface-worker':'gmsh-mesh-worker')||typeof candidate.code!=='string'||!/^[A-Z][A-Z0-9_]{1,79}$/.test(candidate.code)||typeof candidate.error!=='string'||['points','cells','triangles','mesh','boundaries','patches','checkpoint','baseline'].some(key=>candidate[key]!==undefined))throw fault();
+    const error=volume?{code:candidate.code,message:candidate.error.slice(0,1024)}:optimize||patchedOptimize?(patchedOptimize?patchedOptimizationFailure:checkpointOptimizationFailure)(candidate,packet.input):checkpoint||patchedCheckpoint?{code:candidate.code,message:candidate.error.slice(0,1024)}:(patched?patchedDiscreteTetraFailure:constrained?constrainedDiscreteTetraFailure:discreteTetraFailure)(candidate,packet.input);
+    failure={code:error.code,message:error.message,...error.details!==undefined&&{details:error.details}};
+  }
+  return {basis:'discrete-native-validation-v1',phase:packet.phase,operation:packet.operation,requestId:packet.requestId,sha256,...failure&&{failure}};
+}

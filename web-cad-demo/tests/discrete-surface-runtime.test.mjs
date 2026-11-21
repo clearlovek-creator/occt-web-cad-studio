@@ -1,0 +1,17 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {configureDiscreteSurfaceRuntime} from '../gateway/discrete-surface-runtime.mjs';
+import {fileInventory} from '../gateway/frontend-release.mjs';
+function fixture(run){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cad-surface-runtime-')),file=path.join(root,'discrete.exe');
+  const b=Buffer.alloc(4096),pe=0x80,opt=pe+24;b.writeUInt16LE(0x5a4d);b.writeUInt32LE(pe,0x3c);b.writeUInt32LE(0x4550,pe);b.writeUInt16LE(0x8664,pe+4);b.writeUInt16LE(1,pe+6);b.writeUInt16LE(240,pe+20);b.writeUInt16LE(0x20b,opt);b.writeUInt32LE(0x200,opt+60);b.writeUInt32LE(16,opt+108);const s=opt+240;b.writeUInt32LE(0x1000,s+12);b.writeUInt32LE(0xe00,s+16);b.writeUInt32LE(0x200,s+20);fs.writeFileSync(file,b);
+  try{return run({root,file});}finally{assert.equal(path.dirname(root),path.resolve(os.tmpdir()));assert.match(path.basename(root),/^cad-surface-runtime-/);fs.rmSync(root,{recursive:true,force:true});}
+}
+test('unconfigured surface runtime is unavailable and never searches inherited PATH',()=>{const r=configureDiscreteSurfaceRuntime({environment:{PATH:'C:/msys64/ucrt64/bin'}});assert.equal(r.factory,null);assert.equal(r.status().configured,false);assert.equal(r.status().publicDistributionQualified,false);});
+test('sealed legacy backend ignores inherited discrete paths, including missing paths',()=>{const r=configureDiscreteSurfaceRuntime({mode:'project-code-snapshot',environment:{DISCRETE_SURFACE_WORKER_PATH:'C:/missing.exe',DISCRETE_SURFACE_RUNTIME_BIN:'C:/elsewhere'}});assert.equal(r.factory,null);});
+test('explicit workspace runtime captures exact files and validates them again before each client',()=>fixture(f=>{let clients=0;class Client{constructor(options){clients++;this.options=options;}}const r=configureDiscreteSurfaceRuntime({environment:{DISCRETE_SURFACE_WORKER_PATH:f.file},Client});assert.equal(clients,0);assert.equal(r.factory().options.workerPath,f.file);assert.equal(clients,1);fs.appendFileSync(f.file,'changed');assert.throws(()=>r.factory(),{code:'SURFACE_RUNTIME_INVALID'});assert.equal(clients,1);assert.equal(r.status().automaticReplay,false);}));
+test('sealed surface worker cannot be replaced by inherited environment and files remain privately captured',()=>fixture(f=>{let received;class Client{constructor(options){received=options;}}const sealed={workerPath:f.file,runtimePath:f.root,files:fileInventory(f.root),distributionQualified:false},r=configureDiscreteSurfaceRuntime({mode:'project-code-snapshot',sealed,environment:{DISCRETE_SURFACE_WORKER_PATH:'C:/other.exe'},Client});sealed.files[0].sha256='a'.repeat(64);r.factory();assert.equal(received.workerPath,f.file);assert.equal(r.status().basis,'sealed-pe-closure-v1');assert.equal(r.status().publicDistributionQualified,false);}));
+test('extra DLLs, mismatched executable directory and incomplete configuration fail closed',()=>fixture(f=>{fs.writeFileSync(path.join(f.root,'unused.dll'),'bad');assert.throws(()=>configureDiscreteSurfaceRuntime({environment:{DISCRETE_SURFACE_WORKER_PATH:f.file}}),{code:'SURFACE_RUNTIME_INVALID'});assert.throws(()=>configureDiscreteSurfaceRuntime({environment:{DISCRETE_SURFACE_WORKER_PATH:f.file,DISCRETE_SURFACE_RUNTIME_BIN:path.dirname(f.root)}}),{code:'SURFACE_RUNTIME_INVALID'});assert.throws(()=>configureDiscreteSurfaceRuntime({environment:{DISCRETE_SURFACE_RUNTIME_BIN:f.root}}),{code:'SURFACE_RUNTIME_INVALID'});}));

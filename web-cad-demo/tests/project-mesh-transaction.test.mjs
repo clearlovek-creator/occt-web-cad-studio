@@ -1,0 +1,62 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {archiveFixture} from './helpers/project-mesh-archive-fixture.mjs';
+import {ProjectFileService} from '../gateway/project-file-service.mjs';
+import {ProjectMeshAssets} from '../gateway/project-mesh-assets.mjs';
+import {MeshAssetRegistry} from '../gateway/mesh-asset-registry.mjs';
+import {projectMeshFileOperation} from '../gateway/project-mesh-file-operations.mjs';
+import {PersistentHistoryStore} from '../gateway/history-store.mjs';
+import {PropertySchemaStore} from '../gateway/property-schema-store.mjs';
+import {MeshStrategyStore} from '../gateway/mesh-strategy-store.mjs';
+import {ProjectDataStore} from '../gateway/project-data-store.mjs';
+import {encodeProjectPackage,decodeProjectPackage} from '../gateway/project-package.mjs';
+const oldGeometry=Buffer.from('BINFILE'+'old'.repeat(50)),newGeometry=Buffer.from('BINFILE'+'new'.repeat(50)),projectData={projectDataVersion:1,propertySchema:{schemaVersion:1,types:[],instances:[]},meshStrategies:{schemaVersion:1,strategies:[]}};
+async function fixture(t){
+  const f=archiveFixture(t,{derived:true}),history=new PersistentHistoryStore(f.root),properties=new PropertySchemaStore(f.root),strategies=new MeshStrategyStore(f.root),data=new ProjectDataStore({propertySchemaStore:properties,meshStrategyStore:strategies}),models=new Map([['target',oldGeometry],['doc',newGeometry]]),commands=[];
+  properties.createType('target',{key:'KeepOriginal',fields:[]});const original=history.snapshotPath('target');fs.mkdirSync(path.dirname(original),{recursive:true});fs.writeFileSync(original,oldGeometry);history.commit('target',{current:original,undo:[],redo:[]});
+  const hooks={},command=async(operation,{documentId,parameters})=>{commands.push({operation,documentId,path:parameters?.path});if(operation==='document.snapshot')fs.writeFileSync(parameters.path,models.get(documentId)||oldGeometry);if(operation==='document.restore'){if(hooks.rejectRollback&&path.basename(parameters.path).startsWith('rollback-'))return {ok:false,error:'rollback unavailable'};models.set(documentId,fs.readFileSync(parameters.path));hooks.afterRestore?.(parameters.path);}const modern=(models.get(documentId)||oldGeometry).equals(newGeometry),view=modern?structuredClone(f.f.view):{...structuredClone(f.f.view),revision:0,bodyMetadata:f.f.view.bodyMetadata.map(body=>({...body,bodyIdentity:'e'.repeat(32)}))};view.documentId=documentId;view.features=[];hooks.changeView?.(view,modern);return {...view,sourceBindingsApplied:parameters?.sourceBindings?.length||0};};
+  const host={dataDir:f.root,jobs:new Map(),admitting:new Set(),activeRequests:new Set(),maxStoredJobs:2000,maxJobsPerDocument:500,artifacts:{execute:async({operation,result})=>projectMeshFileOperation(f.root,operation,result)},storageBudget:{reserve:async()=>({bytes:4*1024**3,verify:async()=>{},release:()=>{}})},safeLive:async id=>command('document.summary',{documentId:id}),serializeDocument:async(_id,work)=>work(),command};
+  let files;const assets=new ProjectMeshAssets({host,projectBusy:id=>files?.hasUnconfirmed(id)||false});await assets.start();t.after(()=>assets.close());
+  files=new ProjectFileService({dataDir:f.root,historyStore:history,propertySchemaStore:properties,projectDataStore:data,command,meshIntegration:assets,inspectSources:async file=>{hooks.inspect?.(file);return {metadataComplete:true,sources:[]};},onCommitStart:()=>hooks.onCommit?.(),onWarning:()=>{}});
+  const packet=()=>encodeProjectPackage({geometry:newGeometry,projectData,meshArchive:f.capture(),documentId:'doc',revision:f.f.source.revision,name:'带网格工程'});
+  const state=()=>({geometry:Buffer.from(models.get('target')),schema:data.list('target'),history:history.get('target'),assets:assets.registry.snapshot('target')});
+  const recover=()=>{const registry=new MeshAssetRegistry(f.root),integration={registry},service=new ProjectFileService({dataDir:f.root,historyStore:history,propertySchemaStore:properties,projectDataStore:data,command,meshIntegration:integration,onWarning:()=>{}});service.recover();return {service,registry};};
+  return {...f,history,properties,data,models,commands,hooks,host,assets,files,packet,state,recover};
+}
+test('actual file service commits geometry, engineering data, history and independent asset pointer together, then resaves a flat V3',async t=>{
+  const f=await fixture(t),source=fs.readFileSync(path.join(f.store.directory(f.job),'result.json')),result=await f.files.open('target',f.packet());assert.equal(result.ok,true);assert.equal(result.projectFile.version,3);assert.equal(f.properties.list('target').types.length,0);assert.deepEqual(f.models.get('target'),newGeometry);const ref=f.assets.registry.list('target')[0];assert.equal(ref.job.jobId,f.job.jobId);assert.notEqual(ref.assetId,f.job.jobId);assert.equal(fs.existsSync(f.files.journalPath('target')),false);const bytes=await f.files.save('target'),decoded=decodeProjectPackage(bytes);assert.equal(decoded.packageVersion,3);assert.equal(decoded.meshArchive.assets[0].assetId,ref.assetId);await f.files.open('second',bytes);const second=f.assets.registry.list('second')[0];assert.notEqual(second.assetId,ref.assetId);assert.equal(second.job.jobId,ref.job.jobId);assert.deepEqual(fs.readFileSync(path.join(f.store.directory(f.job),'result.json')),source);assert.deepEqual(fs.readdirSync(f.files.transactions),[]);
+});
+test('history publication failure after asset pointer replacement restores the complete previous engineering state',async t=>{
+  const f=await fixture(t);await f.files.open('target',f.packet());f.properties.createType('target',{key:'StillHere',fields:[]});const before=f.state(),commit=f.history.commit.bind(f.history);let observed=false;
+  f.history.commit=(id,next,options)=>{if(id==='target'&&next.current!==before.history.current&&!observed){observed=true;assert.notEqual(f.assets.registry.snapshot(id).setId,before.assets.setId);throw Error('history publication refused');}return commit(id,next,options);};
+  await assert.rejects(f.files.open('target',f.packet()),/history publication refused/);assert.equal(observed,true);assert.deepEqual(f.state(),before);assert.equal(fs.existsSync(f.files.journalPath('target')),false);assert.equal(f.assets.fences.size,0);
+});
+test('cancellation after actual geometry restore rolls back schema, history and mesh pointer before returning',async t=>{
+  const f=await fixture(t),before=f.state(),controller=new AbortController();f.hooks.afterRestore=file=>{if(path.basename(file)==='model.xbf')controller.abort();};await assert.rejects(f.files.open('target',f.packet(),{signal:controller.signal}),{code:'PROJECT_FILE_CANCELLED'});assert.deepEqual(f.state(),before);assert.equal(f.assets.registry.list('target').length,0);assert.equal(f.assets.fences.size,0);
+});
+test('archive geometry baseline must match actual restored identities, not just matching revision or body names',async t=>{
+  const f=await fixture(t),before=f.state();f.hooks.changeView=(view,modern)=>{if(modern)view.bodyMetadata[0].topologyIdentity='9'.repeat(32);};await assert.rejects(f.files.open('target',f.packet()),{code:'PROJECT_MESH_SOURCE_MISMATCH'});assert.deepEqual(f.state(),before);assert.equal(f.assets.registry.list('target').length,0);
+});
+test('restart rolls a prepared combined transaction back even after the next asset pointer was published',async t=>{
+  const f=await fixture(t),before=f.state(),commit=f.history.commit.bind(f.history);let injected=false;f.history.commit=(id,next,options)=>{if(id==='target'&&next.current!==before.history.current&&!injected){injected=true;f.hooks.rejectRollback=true;throw Error('stop before history commit');}return commit(id,next,options);};await assert.rejects(f.files.open('target',f.packet()),{code:'PROJECT_ROLLBACK_FAILED'});assert.equal(fs.existsSync(f.files.journalPath('target')),true);assert.ok(f.assets.registry.snapshot('target').setId);f.hooks.rejectRollback=false;const recovered=f.recover();assert.equal(recovered.service.hasUnconfirmed('target'),false);assert.deepEqual(recovered.registry.snapshot('target'),before.assets);assert.deepEqual(f.data.list('target'),before.schema);assert.deepEqual(f.history.get('target'),before.history);assert.deepEqual(fs.readFileSync(f.history.get('target').current),oldGeometry);assert.equal(fs.existsSync(f.files.journalPath('target')),false);
+});
+test('restart finalizes a committed combined transaction without replaying CAD or losing restored assets',async t=>{
+  const f=await fixture(t);f.files.finishFiles=()=>{throw Error('cleanup deferred');};const result=await f.files.open('target',f.packet());assert.equal(result.ok,true);const next=f.assets.registry.snapshot('target'),calls=f.commands.length;assert.equal(JSON.parse(fs.readFileSync(f.files.journalPath('target'))).phase,'committed');const recovered=f.recover();assert.deepEqual(recovered.registry.snapshot('target'),next);assert.equal(f.commands.length,calls);recovered.registry.adoptAll(recovered.registry.loadAll());assert.equal(recovered.registry.list('target').length,1);assert.equal(fs.existsSync(f.files.journalPath('target')),false);
+});
+test('changed staged geometry is rejected before live restore and only its private import directory is removed',async t=>{
+  const f=await fixture(t),before=f.state();f.hooks.inspect=file=>fs.appendFileSync(file,'changed');await assert.rejects(f.files.open('target',f.packet()),{code:'PROJECT_INPUT_CHANGED'});assert.deepEqual(f.state(),before);assert.equal(f.commands.some(command=>command.operation==='document.restore'),false);assert.deepEqual(fs.readdirSync(f.files.assets),[]);
+});
+test('legacy open explicitly clears the imported asset pointer and a subsequent save uses V2',async t=>{
+  const f=await fixture(t);await f.files.open('target',f.packet());const previous=f.assets.registry.assetRoot(f.assets.registry.snapshot('target'));await f.files.open('target',oldGeometry);assert.equal(f.assets.registry.list('target').length,0);assert.equal(f.assets.registry.snapshot('target').setId,null);assert.equal(fs.existsSync(previous),true);assert.equal(decodeProjectPackage(await f.files.save('target')).packageVersion,2);
+});
+test('storage refusal happens before any native restore and releases the file snapshot fence',async t=>{
+  const f=await fixture(t),before=f.state();f.host.storageBudget.reserve=async()=>{throw Object.assign(Error('capacity refused'),{code:'MESH_STORAGE_CAPACITY'});};await assert.rejects(f.files.open('target',f.packet()),{code:'MESH_STORAGE_CAPACITY'});assert.deepEqual(f.state(),before);assert.equal(f.commands.length,0);assert.equal(f.assets.fences.size,0);assert.deepEqual(fs.readdirSync(f.files.assets),[]);
+});
+test('imported task capacity is charged before geometry restore and cannot silently evict another project',async t=>{
+  const f=await fixture(t);f.host.maxStoredJobs=1;await f.files.open('target',f.packet());const before=f.state(),calls=f.commands.length;await assert.rejects(f.files.open('second',f.packet()),{code:'MESH_TASK_CAPACITY'});assert.deepEqual(f.state(),before);assert.equal(f.commands.length,calls);assert.equal(f.assets.registry.list('target').length,1);assert.equal(f.assets.registry.list('second').length,0);
+});
+test('a foreign valid asset pointer blocks recovery instead of being overwritten by an older prepared journal',async t=>{
+  const f=await fixture(t),before=f.state(),commit=f.history.commit.bind(f.history);let injected=false;f.history.commit=(id,next,options)=>{if(id==='target'&&next.current!==before.history.current&&!injected){injected=true;f.hooks.rejectRollback=true;throw Error('stop before history');}return commit(id,next,options);};await assert.rejects(f.files.open('target',f.packet()),{code:'PROJECT_ROLLBACK_FAILED'});const directory=fs.mkdtempSync(path.join(f.files.assets,'target-'));fs.writeFileSync(path.join(directory,'input.cadproj'),f.packet());const staged=projectMeshFileOperation(f.root,'project-package-open',{documentId:'target',folderName:path.basename(directory),maxUnpackedBytes:16*1024**2,maxPackedBytes:16*1024**2,storageBytes:64*1024**2});f.assets.registry.replaceSnapshot('target',staged.preparedMeshAssets.snapshot);const foreign=f.assets.registry.snapshot('target'),recovered=f.recover();assert.equal(recovered.service.hasUnconfirmed('target'),true);assert.deepEqual(recovered.registry.snapshot('target'),foreign);assert.equal(fs.existsSync(f.files.journalPath('target')),true);
+});

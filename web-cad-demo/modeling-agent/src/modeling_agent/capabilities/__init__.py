@@ -1,0 +1,1 @@
+"""Tool and capability registry."""

@@ -1,0 +1,9 @@
+export function admissionFixture({bodyId='body-1',revision=2,bodyIdentity='a'.repeat(32),topologyIdentity='b'.repeat(32),threshold=.2}={}){
+  const source={version:1,documentId:'admission',revision,bodies:[{bodyId,kind:'solid',bodyIdentity,topologyIdentity,topologyRevision:revision}]},anchor={bodyId,cadFaceId:`face-${revision}-1`,bodyIdentity,topologyIdentity,topologyRevision:revision};
+  const index={version:1,requestId:'admission',qualityName:'minSICN',threshold,positions:[0,0,0,1,0,0,0,1,0,0,0,1],cells:[{elementId:'1',elementType:4,order:1,volumeTag:1,quality:.8,minJacobian:1,maxJacobian:1,invalid:false,inverted:false,degenerate:false,corners:[0,1,2,3],bodyIds:[bodyId]}]};
+  const mesh={dimension:3,nodeCount:4,elementCount:1,qualityDiagnostics:true,quality:{version:2,qualityName:'minSICN',threshold,status:'complete',unsupportedElementCount:0,tetraCount:1,finiteCount:1,nonFiniteQualityCount:0,badCount:0,invalidCount:0,invertedCount:0,degenerateCount:0,minQuality:.8,maxQuality:.8,averageQuality:.8},
+    sourceInventory:{version:1,solids:[{solidIndex:0,bodyIds:[bodyId]}],surfaceCount:1,sourceFaceKeys:[`${bodyId}/${anchor.cadFaceId}`]},
+    render:{dimension:3,kind:'wire',positions:[],groups:[{groupId:'solid-1/owner/'+bodyId,kind:'solid',solidId:'solid-1',solidIndex:0,bodyId,wirePositions:[0,0,0,1,0,0]}],ownership:{mode:'occt-history-index',unmappedBodyIds:[],unassignedVolumeTags:[],assignments:[{volumeTag:1,solidIndex:0,preparedSolidIndex:0,bodyId,confidence:1}]}},
+    conformity:{basis:'shared-node-tags',interfaceCount:0,embeddedSurfaceCount:0,nonConformalCount:0,interfaces:[]},boundaryMapping:{version:1,backend:'occt-history',complete:true,repairMode:'strict',sourceFaces:[{source:anchor,state:'mapped',surfaceTags:[1]}],surfaces:[{meshFaceId:'mesh-face-1',surfaceTag:1,area:.5,elementCount:4,sources:[anchor],adjacentSolidIds:['solid-1'],embeddedSolidIds:[]}]}};
+  return {source,index,mesh};
+}
