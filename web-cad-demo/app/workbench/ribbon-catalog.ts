@@ -18,7 +18,7 @@ export const WORKBENCH_TABS: { label: string; groups: RibbonGroup[] }[] = [
       tool("新建工程", "file", "file.new"),
       tool("打开工程", "file", "file.open"),
       tool("保存工程", "save", "file.save"),
-      tool("另存为", "export", "file.exchange"),
+      tool("另存为", "export", "file.saveAs"),
       tool("恢复工程", "file", "project.workspaces"),
       tool("备份管理", "save", "project.backups"),
     ] },
@@ -86,7 +86,7 @@ export const WORKBENCH_TABS: { label: string; groups: RibbonGroup[] }[] = [
       tool("交集", "intersection", "boolean.common"),
     ] },
     { label: "分割", tools: [
-      tool("切割", "box", "boolean.section"),
+      tool("截交线", "box", "boolean.section"),
       tool("分割实体", "box", "boolean.split"),
       tool("片段提取", "box", "boolean.fragments"),
       tool("分区", "union", "boolean.partition"),

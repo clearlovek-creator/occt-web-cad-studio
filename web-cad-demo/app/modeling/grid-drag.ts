@@ -1,7 +1,8 @@
 import type { PrimitiveKind, SurfaceKind } from "../workbench/ribbon-catalog";
 export type GridDragKind = PrimitiveKind | "disk" | "rectangle" | `surface-${SurfaceKind}`;
 
-export type GridPoint = { x: number; y: number };
+export type GeometrySnapKind = "endpoint" | "midpoint";
+export type GridPoint = { x: number; y: number; snap?: GeometrySnapKind };
 export type GridDragStage = "idle" | "base" | "height";
 
 /** Shared progress vocabulary for the viewport; planar/radial tools finish in two steps. */
@@ -77,12 +78,14 @@ export function gridDragInstruction(kind: GridDragKind, stage: GridDragStage) {
 export function needsDragHeight(kind: GridDragKind) { return !["sphere", "surface-sphere", "disk", "rectangle", "surface-disk", "surface-rectangle"].includes(kind); }
 export function makeGridDragCommand(kind: GridDragKind, start: GridPoint, end: GridPoint, gridStep = 1, requestedHeight = 20) {
   if (![start.x, start.y, end.x, end.y, gridStep, requestedHeight].every(Number.isFinite) || gridStep <= 0) return null;
-  const dx = Math.abs(Math.round(end.x / gridStep) - Math.round(start.x / gridStep)) * gridStep;
-  const dy = Math.abs(Math.round(end.y / gridStep) - Math.round(start.y / gridStep)) * gridStep;
+  const geometrySnapped = Boolean(start.snap || end.snap);
+  const dx = geometrySnapped ? Math.abs(end.x - start.x) : Math.abs(Math.round(end.x / gridStep) - Math.round(start.x / gridStep)) * gridStep;
+  const dy = geometrySnapped ? Math.abs(end.y - start.y) : Math.abs(Math.round(end.y / gridStep) - Math.round(start.y / gridStep)) * gridStep;
   const shape = kind.replace("surface-", "");
   const rectangular = ["box", "wedge", "pyramid", "rectangle"].includes(shape);
   const radius = Math.hypot(dx, dy), diameter = radius * 2;
-  if (rectangular ? dx < gridStep || dy < gridStep : radius < gridStep) return null;
+  const minimumFootprint = geometrySnapped ? 1e-7 : gridStep;
+  if (rectangular ? dx < minimumFootprint || dy < minimumFootprint : radius < minimumFootprint) return null;
   const height = Math.max(gridStep, requestedHeight);
   const surface = kind.startsWith("surface-") || kind === "disk" || kind === "rectangle";
 

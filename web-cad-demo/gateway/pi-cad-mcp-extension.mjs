@@ -1,4 +1,5 @@
 import {CadMcpProcessClient,McpProcessError} from './cad-mcp-process-client.mjs';
+import {requiresPiWriteApproval} from './pi-write-approval.mjs';
 
 function catalog(value){
   if(!Array.isArray(value)||!value.length||value.length>256)throw new McpProcessError('MCP_CATALOG_INVALID','CAD 工具目录数量无效。');
@@ -7,7 +8,7 @@ function catalog(value){
   return value;
 }
 export default function cadMcpExtension(pi,{clientFactory=options=>new CadMcpProcessClient(options)}={}){
-  const configuration={serverPath:process.env.CAD_MCP_SERVER_PATH,apiRoot:process.env.CAD_GEOMETRY_API_URL,documentId:process.env.CAD_DOCUMENT_ID,onDiagnostic:message=>pi.logger?.debug?.(message)};
+  const configuration={serverPath:process.env.CAD_MCP_SERVER_PATH,apiRoot:process.env.CAD_GEOMETRY_API_URL,documentId:process.env.CAD_DOCUMENT_ID,piSessionId:process.env.CAD_PI_SESSION_ID,piToolToken:process.env.CAD_PI_TOOL_TOKEN,onDiagnostic:message=>pi.logger?.debug?.(message)};
   // Pi's AgentToolResult does not consume MCP's top-level isError. Use the
   // native result hook, and trust only details objects created by this adapter.
   const failedResults=new WeakSet();
@@ -49,7 +50,12 @@ export default function cadMcpExtension(pi,{clientFactory=options=>new CadMcpPro
                 }
                 if(owner!==epoch)throw new McpProcessError('MCP_SESSION_CHANGED','会话已变化，未发送迟到工具请求。');
                 if(!active)throw new McpProcessError('MCP_NOT_RUNNING','CAD 工具连接尚未就绪。');
-                const result=await active.request('tools/call',{name:tool.name,arguments:params||{}},{signal,readOnly,onProgress:message=>onUpdate?.({content:[{type:'text',text:message}],details:{mcpTool:tool.name,outcome:'pending'}})});
+                const needsApproval=configuration.piSessionId&&requiresPiWriteApproval({
+                  ...params,operation:tool.name==='batch_modify'?'project.batch':tool.name.replaceAll('__','.'),
+                });
+                const result=await active.request('tools/call',{name:tool.name,arguments:params||{}},{signal,readOnly,
+                  ...(needsApproval?{timeoutMs:275000}:{}),
+                  onProgress:message=>onUpdate?.({content:[{type:'text',text:message}],details:{mcpTool:tool.name,outcome:'pending'}})});
                 if(!result||typeof result!=='object'||!Array.isArray(result.content)||!result.content.length||result.content.length>64)throw new McpProcessError('MCP_TOOL_RESULT_INVALID','工具回复格式无效，操作结果需查询核对。',{outcome:readOnly?'unchanged':'unknown'});
                 if(result.isError&&!readOnly)active.requireReconciliation();
                 if(tool.name==='query_model'&&!result?.isError){

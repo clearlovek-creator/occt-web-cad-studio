@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { FeatureData } from "./ModelMetadataPanels";
+import type { StepImportReport } from "../shared/step-import-status.mjs";
 
 export type StepImportModel = {
   ok: true;
@@ -10,6 +11,7 @@ export type StepImportModel = {
   bodyId: string;
   topologyRevision: number;
   features: FeatureData[];
+  stepImport?: StepImportReport;
   positions: number[];
   normals: number[];
   indices: number[];
@@ -32,7 +34,7 @@ export function StepExchangePanel({
   onImport: (file: File) => Promise<StepImportModel>;
   onExport: () => Promise<string>;
   onProjectSave: () => Promise<void>;
-  onProjectOpen: (file: File) => Promise<unknown>;
+  onProjectOpen: (file: File) => Promise<void>;
   projectSaveBusy: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -42,11 +44,12 @@ export function StepExchangePanel({
 
   const importFile = async (file: File) => {
     setBusy(true);
-    setMessage("正在导入 STEP…");
+    setMessage("正在追加 STEP…");
     try {
       const result = await onImport(file);
       onImported(result);
-      setMessage(`已导入 ${file.name}`);
+      const added = result.stepImport?.bodyCount;
+      setMessage(added === undefined ? `已追加 ${file.name}` : `已追加 ${file.name} · ${added} 个 Body`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "STEP 导入失败。");
     } finally {
@@ -56,8 +59,8 @@ export function StepExchangePanel({
   };
 
   const openProject = async (file: File) => {
-    setBusy(true); setMessage("正在打开工程…");
-    try { const result = await onProjectOpen(file); onImported(result as StepImportModel); setMessage(`已打开 ${file.name}`); }
+    setBusy(true); setMessage(null);
+    try { await onProjectOpen(file); }
     catch (error) { setMessage(error instanceof Error ? error.message : "工程打开失败。"); }
     finally { setBusy(false); if (projectInputRef.current) projectInputRef.current.value = ""; }
   };
@@ -88,6 +91,7 @@ export function StepExchangePanel({
         <span className="feature-badge">AP242</span>
       </div>
       <p className="panel-copy">工程包包含精确几何、变量、材料、坐标系、属性类型和实例，以及 STEP 重算来源。旧 XBF 仅作为兼容格式打开。网格结果与 Agent 会话不包含在本版工程包中。</p>
+      <p className="panel-copy">导入 STEP 会将零件追加到当前工程。</p>
       <input
         ref={projectInputRef}
         type="file"

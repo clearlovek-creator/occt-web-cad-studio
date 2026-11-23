@@ -12,6 +12,7 @@ import {modelingTaskTerminal} from '../shared/modeling-task-status.mjs';
 import {modelingTaskTouchesDocument} from './modeling/modeling-task-client';
 import {PiSessionOwnershipPanel} from './PiSessionOwnershipPanel';
 import {piOwnershipPendingKey} from './modeling/pi-session-ownership-client';
+import {PiWriteApprovalCard,type PiApprovalBinding} from './workbench/PiWriteApprovalCard';
 
 type PiModel = { id: string; name?: string; provider: string; contextWindow?: number; reasoning?: boolean };
 type Props = { revision: number | null; selection: ModelingSelection | null; onCommitted?: (result: ModelingCommandResponse) => void; onOpenSettings?: () => void };
@@ -45,6 +46,7 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted, onOpenS
   const stopWaiting=Boolean(currentStop&&(['sending','uncertain','refreshing'].includes(currentStop.phase)||currentStop.phase==='checking'&&(busy||modelingPending)));
   const controlsBusy=busy||modelingPending||stopWaiting||transferring;
   const [connectionPhase,setConnectionPhase]=useState<PiConnectionPhase>('connecting');
+  const [approvalBinding,setApprovalBinding]=useState<PiApprovalBinding|null>(null);
   const connected=connectionPhase==='online',connecting=connectionPhase==='connecting'||connectionPhase==='synchronizing';
   const [connectionNotice,setConnectionNotice]=useState<string|null>(null);
   const [ownershipBinding,setOwnershipBinding]=useState<{sessionId:string;documentId:string}|null>(null);
@@ -154,6 +156,7 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted, onOpenS
       onSession:remoteId=>localStorage.setItem(storageKey,remoteId),
       onStatus:phase=>{
         setConnectionPhase(phase);
+        setApprovalBinding(phase==='online'?connection.getApprovalBinding():null);
         if(phase==='offline'||phase==='interrupted'){
           setBusy(false);setQueued(0);nativeBusy.current={streaming:false,compacting:false};
           setMessages(current=>current.map(item=>['running','streaming'].includes(item.status||'')?{...item,status:'interrupted'}:item));
@@ -271,6 +274,7 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted, onOpenS
       {busy && !messages.some((item) => item.role === "assistant" && item.status === "streaming") && <div className="pi-agent-thinking">Pi Agent 正在运行<span>…</span></div>}
     </div>
     {unread && <button type="button" className="pi-agent-show-latest" onClick={showLatest}>有新消息 · 回到最新 ↓</button>}
+    {connected && approvalBinding?.documentId===documentId && <PiWriteApprovalCard key={approvalBinding.streamId} {...approvalBinding} disabled={transferring||stopWaiting}/>}
     {connectionNotice&&!ownerRecovery&&<p className="pi-agent-connection-note" role="status">{connectionNotice}</p>}
     {currentStop?.notice&&<div className="pi-agent-connection-note pi-agent-stop-note" role="status" data-testid="pi-stop-status" data-phase={currentStop.phase}><span>{currentStop.notice}</span>{['uncertain','refreshing'].includes(currentStop.phase)&&<button type="button" disabled={!connected||currentStop.phase==='refreshing'} onClick={()=>void stopRef.current?.check()}>{currentStop.phase==='refreshing'?'检查中':'检查停止状态'}</button>}</div>}
     {error && <div className="pi-agent-error" role="alert">{error}</div>}

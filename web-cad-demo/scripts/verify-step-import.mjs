@@ -54,10 +54,10 @@ try{
     page.once('dialog',dialog=>void dialog.accept());await page.reload({waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>document.querySelector('[data-testid="step-import-status"]')?.dataset.phase==='converting');assert.equal(uploadCount,count);
     tell('release-geometry');await page.waitForFunction(()=>document.querySelector('[data-testid="step-import-status"]')?.dataset.phase==='complete');
-    await page.waitForFunction(()=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===2);assert.equal((await summary()).bodyCount,2);assert.equal(uploadCount,count);
+    await page.waitForFunction(()=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===7);assert.equal((await summary()).bodyCount,7);assert.equal(uploadCount,count);
   });
   await check('a malformed STEP reports failure while the complete previously displayed project remains intact',async()=>{
-    await page.getByRole('tab',{name:'工程',exact:true}).click();const before=await summary();assert.equal(await upload(path.join(fixtures,'bad.step')),400);await page.getByText(/OCCT could not parse the STEP file/).first().waitFor();const after=await summary();assert.equal(after.stateToken,before.stateToken);assert.deepEqual(after.features,before.features);assert.equal(await page.getByTestId('feature-tree').locator('[data-body-id]').count(),2);assert.equal(await report.getAttribute('data-phase'),'failed');await report.getByText(/原工程保持导入前状态/).waitFor();await page.screenshot({path:path.join(artifacts,'failed-preserves-project.png'),fullPage:true});
+    await page.getByRole('tab',{name:'工程',exact:true}).click();const before=await summary();assert.equal(await upload(path.join(fixtures,'bad.step')),400);await page.getByText(/OCCT could not parse the STEP file/).first().waitFor();const after=await summary();assert.equal(after.stateToken,before.stateToken);assert.deepEqual(after.features,before.features);assert.equal(await page.getByTestId('feature-tree').locator('[data-body-id]').count(),7);assert.equal(await report.getAttribute('data-phase'),'failed');await report.getByText(/原工程保持导入前状态/).waitFor();await page.screenshot({path:path.join(artifacts,'failed-preserves-project.png'),fullPage:true});
   });
   await check('a committed import with a lost production-bridge reply stays unknown and reconciles without another upload',async()=>{
     const before=uploadCount,postPattern='**/api/documents/default/imports/step',statusPattern='**/api/documents/default/imports/step/status*';
@@ -72,20 +72,18 @@ try{
     try{
       assert.equal(await upload(path.join(fixtures,'mixed.step')),503);
       await page.waitForFunction(()=>document.querySelector('[data-testid="step-import-status"]')?.dataset.phase==='unknown');
-      assert.equal((await summary()).bodyCount,5);assert.equal(await page.getByTestId('feature-tree').locator('[data-body-id]').count(),2,'An unreceived commit cannot be claimed as an adopted display');
+      assert.equal((await summary()).bodyCount,12);assert.equal(await page.getByTestId('feature-tree').locator('[data-body-id]').count(),7,'An unreceived commit cannot be claimed as an adopted display');
       assert.equal(uploadCount,before+1);await page.screenshot({path:path.join(artifacts,'bridge-outcome-unknown.png'),fullPage:true});
     }finally{await page.unroute(statusPattern,hideStatus);await page.unroute(postPattern,loseReply);}
     await report.getByRole('button',{name:'核对当前工程',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelector('[data-testid="step-import-status"]')?.dataset.phase==='complete'&&document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===5);
+    await page.waitForFunction(()=>document.querySelector('[data-testid="step-import-status"]')?.dataset.phase==='complete'&&document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===12);
     assert.equal(uploadCount,before+1,'Read-only reconciliation must never upload again');
-    // Restore this isolated fixture through a new, explicit successful import.
-    assert.equal(await upload(path.join(fixtures,'solids.step')),200);await page.waitForFunction(()=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===2);
   });
   await check('an interrupted import is diagnosed after a real Gateway restart without resubmitting it',async()=>{
     const before=await summary();tell('arm-step');await event('step-armed');await chooseFile(path.join(fixtures,'mixed.step'));await event('step-held');
     const count=uploadCount;await stopTestChild(gateway);gateway=await launch();page.once('dialog',dialog=>void dialog.accept());await page.reload({waitUntil:'networkidle'});
     await page.waitForFunction(()=>['interrupted','unknown'].includes(document.querySelector('[data-testid="step-import-status"]')?.dataset.phase));
-    await report.getByRole('button',{name:'核对当前工程',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===2);
+    await report.getByRole('button',{name:'核对当前工程',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===12);
     const after=await summary();assert.equal(after.revision,before.revision);assert.deepEqual(after.features,before.features);assert.equal(uploadCount,count);await page.screenshot({path:path.join(artifacts,'interrupted.png'),fullPage:true});
   });
   await check('import diagnostics and reconciliation controls stay reachable in a narrow workbench',async()=>{

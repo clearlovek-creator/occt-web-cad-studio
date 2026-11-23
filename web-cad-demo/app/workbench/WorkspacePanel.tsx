@@ -4,7 +4,7 @@ import {modelingController} from "../modeling/runtime";
 import type {WorkspaceMetadata} from "../modeling/modeling-controller";
 import {ProjectLoadStatus} from './ProjectLoadStatus';
 import {documentLoadLabel} from '../modeling/document-load';
-export function WorkspacePanel({current,onRestore,onChanged}:{current:WorkspaceMetadata|null;onRestore:(id:string)=>Promise<void>;onChanged:()=>void}) {
+export function WorkspacePanel({current,onRequestRestore,onRestore,onChanged}:{current:WorkspaceMetadata|null;onRequestRestore:(restore:()=>Promise<void>)=>Promise<void>;onRestore:(id:string)=>Promise<void>;onChanged:()=>void}) {
   const [projects,setProjects]=useState<WorkspaceMetadata[]>([]),[name,setName]=useState(current?.name || ""),[search,setSearch]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null);
   const edited=useRef(false);
   const errorRef=useRef<HTMLParagraphElement>(null);
@@ -26,7 +26,7 @@ export function WorkspacePanel({current,onRestore,onChanged}:{current:WorkspaceM
     <p className="panel-copy">未载入的工程只检查恢复文件，打开时才由内核读取几何；损坏工程不会用空模型替代。</p>
     {restoringId&&<ProjectLoadStatus documentId={restoringId} active={busy}/>}
     <label className="single-field"><span>查找工程</span><input value={search} onChange={event=>setSearch(event.target.value)} placeholder="工程名称或 ID"/></label>
-    <div className="workspace-list">{visible.length ? visible.map(item=><div key={item.documentId} data-workspace-id={item.documentId} className={`workspace-list-row${item.documentId===current?.documentId ? " current" : ""}`}><div><strong>{item.name}</strong><small>{item.documentId}</small><small>{new Date(item.updatedAt).toLocaleString("zh-CN")} · {item.recoverable ? item.hasChangesSinceExport ? "有尚未生成备份的更改" : "备份包已生成" : "恢复快照不可用"}</small>{item.load&&<small>{documentLoadLabel(item.load)}</small>}{item.recoveryWarning&&<small className="workspace-recovery-warning">{item.recoveryWarning}</small>}{item.recoveryError&&<small className="workspace-recovery-error">{item.recoveryError}</small>}</div><button type="button" disabled={busy || !item.recoverable || item.documentId===current?.documentId} onClick={()=>void restore(item.documentId)}>{item.documentId===current?.documentId ? "当前" : "恢复"}</button></div>) : <p className="panel-copy">暂无匹配的可恢复工程。</p>}</div>
+    <div className="workspace-list">{visible.length ? visible.map(item=><div key={item.documentId} data-workspace-id={item.documentId} className={`workspace-list-row${item.documentId===current?.documentId ? " current" : ""}`}><div><strong>{item.name}</strong><small>{item.documentId}</small><small>{new Date(item.updatedAt).toLocaleString("zh-CN")} · {item.recoverable ? item.hasChangesSinceExport ? "有尚未生成备份的更改" : "备份包已生成" : "恢复快照不可用"}</small>{item.load&&<small>{documentLoadLabel(item.load)}</small>}{item.recoveryWarning&&<small className="workspace-recovery-warning">{item.recoveryWarning}</small>}{item.recoveryError&&<small className="workspace-recovery-error">{item.recoveryError}</small>}</div><button type="button" disabled={busy || !item.recoverable || item.documentId===current?.documentId} onClick={()=>void onRequestRestore(()=>restore(item.documentId))}>{item.documentId===current?.documentId ? "当前" : "恢复"}</button></div>) : <p className="panel-copy">暂无匹配的可恢复工程。</p>}</div>
     {error && <p ref={errorRef} className="exchange-message" role="alert">{error}</p>}
   </section>;
 }

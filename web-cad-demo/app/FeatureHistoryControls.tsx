@@ -96,6 +96,7 @@ export function FeatureHistoryControls({
   initialRepair,
   onRepairFinished,
   onModel,
+  onConfirmDelete,
 }: {
   model: {
     revision: number;
@@ -110,6 +111,7 @@ export function FeatureHistoryControls({
   initialRepair?: FeatureRepairProposal | null;
   onRepairFinished?: () => void;
   onModel: (result: DirectModelResult) => void;
+  onConfirmDelete: (featureId: string, bodyId: string | null, run: () => Promise<void>) => void;
 }) {
   const {execute,executeBatch}=useEditorCommands();
   const command=(payload:ModelingCommandInput)=>execute<DirectModelResult>(payload);
@@ -145,7 +147,6 @@ export function FeatureHistoryControls({
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [booleanDraft, setBooleanDraft] = useState<BooleanDraft | null>(null);
   const [busy, setBusy] = useState(false);
-  const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [activeParameterKey, setActiveParameterKey] = useState<string | null>(null);
   const [missingVariable, setMissingVariable] = useState<string | null>(null);
@@ -169,7 +170,6 @@ export function FeatureHistoryControls({
       ? Object.fromEntries(editableNumberEntries(feature).map(([key, value]) => [key, parameterExpression(feature, key, value)]))
       : {});
     setBooleanDraft(feature?.type.startsWith("boolean.") ? booleanDraftFrom(feature) : null);
-    setDeleteConfirm(false);
     setMessage(null);
   };
 
@@ -309,7 +309,6 @@ export function FeatureHistoryControls({
     try {
       const result = await command(request);
       if (action === "delete") setSelectedId("");
-      setDeleteConfirm(false);
       setDraft({});
       setBooleanDraft(null);
       onModel(result);
@@ -423,14 +422,7 @@ export function FeatureHistoryControls({
               title={lifecycleSupported ? "临时跳过此 Feature 并重算下游" : "此类特征暂不支持独立生命周期操作"}
               onClick={() => void changeFeatureLifecycle(selected.state === "suppressed" ? "restore" : "suppress")}
             >{selected.state === "suppressed" ? "恢复 Feature" : "抑制 Feature"}</button>
-            {deleteConfirm ? (
-              <>
-                <button className="feature-delete-confirm" disabled={busy} onClick={() => void changeFeatureLifecycle("delete")}>确认删除</button>
-                <button className="feature-delete-cancel" disabled={busy} onClick={() => setDeleteConfirm(false)}>取消</button>
-              </>
-            ) : (
-              <button className="feature-delete-button" disabled={busy || !lifecycleSupported} title={lifecycleSupported ? "删除并重连下游 Feature" : "此类特征暂不支持独立生命周期操作"} onClick={() => setDeleteConfirm(true)}>删除 Feature</button>
-            )}
+            <button className="feature-delete-button" disabled={busy || !lifecycleSupported} title={lifecycleSupported ? "删除并重连下游 Feature" : "此类特征暂不支持独立生命周期操作"} onClick={() => onConfirmDelete(selected.id, bodyId, () => changeFeatureLifecycle("delete"))}>删除 Feature</button>
           </div>
           {!lifecycleSupported && <p className="panel-copy feature-lifecycle-hint">基础特征通过 Body 管理；可重放的变换、细节特征、生成几何、阵列和 Boolean 支持独立生命周期操作。</p>}
           {!selectedBooleanDraft && <p className="panel-copy recompute-scope">参数支持数值、单位和标量变量表达式；面/边引用按真实拓扑来源追踪，缺失或歧义需显式修复。</p>}

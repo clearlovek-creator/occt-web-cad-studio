@@ -62,6 +62,7 @@ export class PiEventConnection {
   }
   close() { this.disposed = true; clearTimeout(this.retryTimer); this.invalidate(); }
   getBinding(){return Object.freeze({sessionId:this.remoteId,documentId:this.options.documentId});}
+  getApprovalBinding(){return this.streamId ? {...this.getBinding(),streamId:this.streamId} : null;}
   private async json(route: string, body: Record<string, unknown>, epoch: number, timeoutMs = piRpcBrowserTimeoutMs('request')) {
     const controller = new AbortController(); this.controllers.add(controller);
     const timer = setTimeout(() => controller.abort(), timeoutMs);

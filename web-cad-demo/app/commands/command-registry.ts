@@ -3,6 +3,7 @@ export type CadCommandId =
   | "file.new"
   | "file.open"
   | "file.save"
+  | "file.saveAs"
   | "file.importStep"
   | "file.exportStep"
   | "edit.undo"
@@ -55,7 +56,8 @@ const definitions: CadCommandDefinition[] = [
   { id: "file.exchange", label: "工程 / STEP 文件", icon: "FILE", hint: "打开工程保存面板，或执行 STEP 导入导出。" },
   { id: "file.new", label: "新建工程", icon: "+", hint: "创建一个空白工程并切换到新的文档。" },
   { id: "file.open", label: "打开工程", icon: "OPEN", hint: "打开 XBF 工程文件。" },
-  { id: "file.save", label: "保存工程", icon: "SAVE", hint: "将当前工程保存为 XBF 文件。" },
+  { id: "file.save", label: "保存工程", icon: "SAVE", hint: "下载当前工程的 .cadproj 备份。" },
+  { id: "file.saveAs", label: "另存为", icon: "SAVE", hint: "命名并下载当前工程的 .cadproj 副本。" },
   { id: "file.importStep", label: "导入 STEP", icon: "IN", hint: "导入 STEP 或 STP 文件。" },
   { id: "file.exportStep", label: "导出 STEP", icon: "OUT", hint: "导出当前几何为 STEP 文件。" },
   { id: "edit.undo", label: "撤销", icon: "↶", hint: "撤销最近一次文档修改。" },

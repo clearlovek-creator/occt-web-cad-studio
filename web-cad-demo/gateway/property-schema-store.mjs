@@ -176,7 +176,9 @@ export class PropertySchemaStore {
   }
 
   createType(documentId, input = {}) {
-    return this.mutate(documentId,record=>this.createTypeIn(record,input));
+    const followsDescendants = input.targetMode === 'multiple' && ['face', 'edge'].includes(input.targetScope);
+    const definition = followsDescendants && input.splitPolicy === undefined ? {...input, splitPolicy: 'all-descendants'} : input;
+    return this.mutate(documentId, record => this.createTypeIn(record, definition));
   }
 
   createTypeIn(record,input) {

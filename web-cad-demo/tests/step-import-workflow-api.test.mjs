@@ -37,8 +37,8 @@ test('STEP status observes real receiving and converting phases, rejects overlap
     tell('arm-step');await event('step-armed');request.end(bytes.subarray(100));await event('step-held');
     const converting=await status(id,'phases-once');assert.equal(converting.phase,'converting');assert.equal(converting.bytes,bytes.length);assert.equal(converting.fileName,'零件.step');assert.equal(converting.ownerInstanceId,undefined);
     const overlap=await upload(id,'overlap');assert.equal(overlap.status,409);assert.equal(overlap.result.code,'STEP_IMPORT_BUSY');
-    tell('release-geometry');const result=await reply;assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.bodyCount,2);assert.equal(result.stepImportStatus.phase,'complete');
-    const committed=await status(id);assert.equal(committed.requestId,'phases-once');assert.equal(committed.stateToken,result.stateToken);assert.equal(committed.report.bodyCount,2);assert.equal(fs.existsSync(result.features[0].stringParameters.sourcePath),true);
+    tell('release-geometry');const result=await reply;assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.bodyCount,3);assert.equal(result.stepImportStatus.phase,'complete');
+    const committed=await status(id);assert.equal(committed.requestId,'phases-once');assert.equal(committed.stateToken,result.stateToken);assert.equal(committed.report.bodyCount,2);assert.equal(fs.existsSync(result.features.at(-1).stringParameters.sourcePath),true);
     assert.deepEqual(gateway.events.filter(item=>item.type==='fixture.step-phase'&&item.requestId==='phases-once').map(item=>item.phase),['receiving','queued','preparing','converting','committing','complete']);
     const duplicate=await upload(id,'phases-once');assert.equal(duplicate.status,409);assert.equal(duplicate.result.code,'STEP_IMPORT_REQUEST_EXISTS');assert.equal((await cad(id)).stateToken,result.stateToken);
   }finally{request.destroy();tell('release-geometry');}
@@ -60,12 +60,12 @@ test('failed parse has a durable unchanged report; stale token/revision fail bef
   const wrongRevision=await upload(id,'stale-revision',bytes,{'X-Base-State-Token':changed.stateToken,'X-Base-Revision':String(changed.revision+1)});assert.equal(wrongRevision.result.code,'STALE_REVISION');assert.equal((await cad(id)).stateToken,changed.stateToken);
 });
 
-test('successful replacement import is undoable and redoable with the complete prior engineering metadata',async()=>{
-  const id='undo_replacement';await cad(id,'primitive.box',{width:17,depth:18,height:19});await cad(id,'variable.set',{name:'keep',type:'dimensionless',expression:'4'});await cad(id,'coordinate.set',{id:'keep-axis',name:'Keep axis',origin:[5,6,7],xAxis:[1,0,0],yAxis:[0,1,0]});
+test('successful append is undoable and redoable with the complete prior engineering metadata',async()=>{
+  const id='undo_append';await cad(id,'primitive.box',{width:17,depth:18,height:19});await cad(id,'variable.set',{name:'keep',type:'dimensionless',expression:'4'});await cad(id,'coordinate.set',{id:'keep-axis',name:'Keep axis',origin:[5,6,7],xAxis:[1,0,0],yAxis:[0,1,0]});
   await cad(id,'property.type.create',{key:'KeepSetup',association:'none',targetScope:'project',fields:[{key:'frequency',type:'double'}]});
-  const before=await cad(id),typesBefore=await cad(id,'property.type.list'),{result}=await upload(id,'undo-import');assert.equal(result.ok,true);assert.equal(result.canUndo,true,'Import must not discard the prior engineering history');assert.equal(result.bodyCount,2);
+  const before=await cad(id),typesBefore=await cad(id,'property.type.list'),{result}=await upload(id,'undo-import');assert.equal(result.ok,true);assert.equal(result.canUndo,true,'Import must not discard the prior engineering history');assert.equal(result.bodyCount,3);assert.equal(result.stepImport.bodyCount,2);assert.deepEqual(result.features.slice(0,-1),before.features);
   await cad(id,'document.undo');const restored=await cad(id);for(const key of ['features','variables','coordinateSystems','materials','bodyMetadata'])assert.deepEqual(restored[key],before[key],key);assert.deepEqual((await cad(id,'property.type.list')).types,typesBefore.types);
-  await cad(id,'document.redo');const redone=await cad(id);assert.deepEqual(redone.features,result.features);assert.equal(redone.bodyCount,2);assert.equal(fs.existsSync(redone.features[0].stringParameters.sourcePath),true);
+  await cad(id,'document.redo');const redone=await cad(id);assert.deepEqual(redone.features,result.features);assert.equal(redone.bodyCount,3);assert.equal(fs.existsSync(redone.features.at(-1).stringParameters.sourcePath),true);
 });
 
 test('report publication failure after commit preserves the source and accepted import outcome',async()=>{

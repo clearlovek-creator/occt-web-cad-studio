@@ -3,14 +3,18 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <Poly_Triangulation.hxx>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -18,6 +22,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
+#include <limits>
+#include <optional>
 #include <sstream>
 
 namespace
@@ -30,6 +36,51 @@ void writePoint(std::ostream& out, const gp_Pnt& point)
 void writeVector(std::ostream& out, const gp_Vec& vector)
 {
   out << vector.X() << ',' << vector.Y() << ',' << vector.Z();
+}
+
+std::optional<gp_Pnt> curveMidpoint(const BRepAdaptor_Curve& curve, const double first, const double last)
+{
+  try
+  {
+    const double middle = first + (last - first) / 2.0;
+    if (curve.GetType() == GeomAbs_Line || curve.GetType() == GeomAbs_Circle)
+      return curve.Value(middle);
+
+    const double tolerance = Precision::Confusion();
+    const double length = GCPnts_AbscissaPoint::Length(curve, first, last, tolerance);
+    if (!std::isfinite(length) || length <= tolerance) return std::nullopt;
+    const GCPnts_AbscissaPoint halfLength(curve, length / 2.0, first, middle, tolerance);
+    if (halfLength.IsDone() && halfLength.Parameter() > first && halfLength.Parameter() < last)
+      return curve.Value(halfLength.Parameter());
+  }
+  catch (const Standard_Failure&)
+  {
+    // A curve may render even if its half-length point cannot be computed.
+  }
+  return std::nullopt;
+}
+
+void writeSnapPoints(std::ostream& out, const TopoDS_Edge& edge,
+                     const BRepAdaptor_Curve& curve, const double first, const double last)
+{
+  TopoDS_Vertex start, end;
+  TopExp::Vertices(edge, start, end);
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << ",\"snap\":{\"endpoints\":[";
+  if (!start.IsNull())
+  {
+    out << '['; writePoint(out, BRep_Tool::Pnt(start)); out << ']';
+  }
+  if (!end.IsNull() && (start.IsNull() || !start.IsSame(end)))
+  {
+    if (!start.IsNull()) out << ',';
+    out << '['; writePoint(out, BRep_Tool::Pnt(end)); out << ']';
+  }
+  out << ']';
+  if (const auto midpoint = curveMidpoint(curve, first, last))
+  {
+    out << ",\"midpoint\":["; writePoint(out, *midpoint); out << ']';
+  }
+  out << '}' << std::setprecision(10);
 }
 
 double environmentDouble(const char* name, const double fallback)
@@ -186,7 +237,9 @@ std::string ShapeSerializer::SerializeBody() const
       if (sample > 0) edges << ',';
       writePoint(edges, curve.Value(first + (last - first) * sample / (samples - 1.0)));
     }
-    edges << "]}"; firstEdge = false;
+    edges << ']';
+    writeSnapPoints(edges, edge, curve, first, last);
+    edges << '}'; firstEdge = false;
     ++serializedEdges;
   }
   edges << ']';

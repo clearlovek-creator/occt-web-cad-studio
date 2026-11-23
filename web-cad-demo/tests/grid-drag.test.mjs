@@ -116,6 +116,21 @@ test("adjacent decimal grid points create a one-step footprint", () => {
   assert.equal(command.parameters.depth, .1);
 });
 
+test("an exact geometry anchor survives a mixed grid footprint and permits sub-grid geometry dimensions", () => {
+  const start = { x: .25, y: .625, snap: "endpoint" };
+  const end = { x: 3, y: 2 };
+  const box = makeGridDragCommand("box", start, end, 1, 2);
+  assert.equal(box.parameters.x, .25);
+  assert.equal(box.parameters.y, .625);
+  assert.equal(box.parameters.width, 2.75);
+  assert.equal(box.parameters.depth, 1.375);
+  assert.equal(box.preview.width, box.parameters.width);
+  assert.equal(box.preview.depth, box.parameters.depth);
+  const disk = makeGridDragCommand("surface-disk", start, { x: .5, y: .625, snap: "midpoint" }, 1);
+  assert.equal(disk.parameters.radius, .25);
+  assert.equal(makeGridDragCommand("box", start, { ...start, x: 5 }, 1), null);
+});
+
 test("center-based rectangle and pyramid constructors keep the same footprint as their drag preview",()=>{
   for(const kind of ["surface-rectangle","pyramid"]){const command=makeGridDragCommand(kind,{x:40,y:50},{x:-20,y:-10});assert.equal(command.parameters.x,10);assert.equal(command.parameters.y,20);assert.equal(command.preview.x,10);assert.equal(command.preview.y,20);}
 });

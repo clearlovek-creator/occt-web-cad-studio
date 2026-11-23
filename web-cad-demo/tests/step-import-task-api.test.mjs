@@ -6,6 +6,7 @@ import os from 'node:os';
 import { request as httpRequest } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { gatedGeometryGateway } from './helpers/gated-geometry-gateway.mjs';
+import { decodeProjectPackage } from '../gateway/project-package.mjs';
 const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'cad-step-task-api-'));
 function clean(data) { assert.equal(path.dirname(data), path.resolve(os.tmpdir())); assert.ok(path.basename(data).startsWith('cad-step-task-api-')); fs.rmSync(data, { recursive: true, force: true }); }
 async function bytesFor(f) { await f.cad('primitive.box', { width: 7, depth: 8, height: 9 }, {}, 'source'); await f.cad('primitive.sphere', { radius: 2, x: 30 }, {}, 'source'); assert.equal((await f.post('/documents/source/exports/step', {})).value.ok, true); const response = await fetch(f.api + '/exports/source/download'); assert.equal(response.status, 200); return Buffer.from(await response.arrayBuffer()); }
@@ -18,6 +19,92 @@ async function reserve(f, command) { const response = await f.post('/documents/'
 const headers = (command, task) => ({ 'Content-Type': 'application/step', 'X-Cad-Task-Id': task.taskId, 'X-Request-Id': command.requestId, 'X-File-Name': encodeURIComponent(command.fileName), ...(command.baseRevision === undefined ? {} : { 'X-Base-Revision': String(command.baseRevision) }), ...(command.baseStateToken === undefined ? {} : { 'X-Base-State-Token': command.baseStateToken }) });
 async function upload(f, command, task, bytes, extra = {}) { const response = await fetch(f.api + '/documents/' + command.documentId + '/imports/step', { method: 'POST', headers: { ...headers(command, task), ...extra }, body: bytes }); return { status: response.status, value: await response.json() }; }
 const status = (f, task) => f.get('/documents/' + task.documentId + '/modeling-tasks/' + task.taskId).then(value => value.modelingTask);
+
+test('two STEP appends preserve the original project, undo independently and retain both sources through save and reopen', async () => {
+    const data = scratch(); let f;
+    try {
+        f = await gatedGeometryGateway(data);
+        await baseline(f);
+        const originalId = 'body-1';
+        await f.cad('coordinate.set', { id:'local', name:'Local', origin:[2,3,4], xAxis:[1,0,0], yAxis:[0,1,0] });
+        await f.cad('material.set', { name:'OriginalMaterial', category:'dielectric', relativePermittivity:4 });
+        await f.cad('body.update', { name:'Original', material:'OriginalMaterial', visible:false }, { bodyId:originalId });
+        const original = await snapshot(f);
+        const sourceBytes = [];
+        for (const [id, width, x] of [['source_one',7,40],['source_two',5,85]]) {
+            await f.cad('primitive.box', { width, depth:8, height:9, x }, {}, id);
+            assert.equal((await f.post(`/documents/${id}/exports/step`, {})).status, 200);
+            const download = await fetch(`${f.api}/exports/${id}/download`);
+            assert.equal(download.status, 200);
+            sourceBytes.push(Buffer.from(await download.arrayBuffer()));
+        }
+        const features = [], importedIds = [];
+        let afterFirst, latest = original.model;
+        for (const bytes of sourceBytes) {
+            const command = input(bytes, latest);
+            const added = await upload(f, command, await reserve(f, command), bytes);
+            assert.equal(added.status, 200, JSON.stringify(added.value));
+            assert.equal(added.value.stepImport.bodyCount, 1);
+            assert.equal(added.value.stepImportStatus.report.bodyCount, 1);
+            assert.equal(added.value.revision, latest.revision + 1);
+            assert.equal(added.value.bodyCount, latest.bodyCount + 1);
+            const feature = added.value.features.at(-1);
+            features.push(feature);
+            importedIds.push(feature.outputBodies[0]);
+            latest = added.value;
+            if (!afterFirst) afterFirst = await snapshot(f);
+        }
+        assert.equal(new Set([originalId, ...importedIds]).size, 3);
+        assert.notEqual(features[0].stringParameters.sourcePath, features[1].stringParameters.sourcePath);
+        assert.notEqual(features[0].stringParameters.sourceFingerprint, features[1].stringParameters.sourceFingerprint);
+        const appended = await snapshot(f);
+        assert.deepEqual(appended.model.features, [...original.model.features, ...features]);
+        assert.deepEqual(appended.model.bodyMetadata.find(body => body.bodyId === originalId), original.model.bodyMetadata[0]);
+        assert.deepEqual(appended.typed, original.typed);
+        assert.deepEqual(appended.raw, original.raw);
+
+        await f.cad('document.undo');
+        await unchanged(f, afterFirst, {sameToken:false});
+        await f.cad('document.undo');
+        await unchanged(f, original, {sameToken:false});
+        await f.cad('document.redo');
+        await f.cad('document.redo');
+        await unchanged(f, appended, {sameToken:false});
+
+        const job = await f.post('/documents/default/mesh/jobs', { background:true, qualityThreshold:0, sizing:{version:1, globalSize:5, rules:[]} });
+        assert.equal(job.status, 202, JSON.stringify(job.value));
+        const mesh = await f.until(async () => {
+            const result = await f.get('/mesh/jobs/' + job.value.meshJob.jobId);
+            return ['complete','failed'].includes(result.meshJob?.state) ? result : null;
+        }, 'All three solids were not sent to the mesh worker', 30000);
+        assert.equal(mesh.meshJob.state, 'complete', JSON.stringify(mesh.meshJob));
+        assert.equal(mesh.mesh.admission.usable, true, JSON.stringify(mesh.mesh.admission));
+        assert.deepEqual(mesh.mesh.sourceInventory.solids.flatMap(item => item.bodyIds).sort(), [originalId, ...importedIds].sort());
+
+        const saved = await fetch(f.api + '/documents/default/project/save', {method:'POST'});
+        assert.equal(saved.status, 200, await saved.clone().text());
+        const archive = Buffer.from(await saved.arrayBuffer());
+        const sources = new Map(decodeProjectPackage(archive).sources.map(source => [source.featureId, source.bytes]));
+        assert.equal(sources.size, 2);
+        features.forEach((feature, index) => assert.deepEqual(sources.get(feature.id), sourceBytes[index]));
+        const copy = 'append_copy';
+        const opened = await fetch(f.api + `/documents/${copy}/project/open`, {method:'POST', headers:{'Content-Type':'application/vnd.webcad.project'}, body:archive});
+        assert.equal(opened.status, 200, await opened.clone().text());
+        const reopened = await f.cad('document.summary', {}, {}, copy);
+        assert.deepEqual(reopened.bodyMetadata, appended.model.bodyMetadata);
+        for (const [index, feature] of reopened.features.filter(item => item.type === 'import.step').entries()) {
+            assert.notEqual(feature.stringParameters.sourcePath, features[index].stringParameters.sourcePath);
+            assert.deepEqual(fs.readFileSync(feature.stringParameters.sourcePath), sourceBytes[index]);
+        }
+        const moved = await f.cad('transform.translate', {dx:-38,dy:0,dz:0}, {bodyId:importedIds[0]}, copy);
+        const edited = await f.cad('feature.update', {dx:-39}, {featureId:moved.features.at(-1).id}, copy);
+        assert.deepEqual(edited.bodyMetadata.find(body => body.bodyId === importedIds[1]), reopened.bodyMetadata.find(body => body.bodyId === importedIds[1]));
+        const cut = await f.cad('boolean.cut', {}, {targetBody:originalId, toolBody:importedIds[0]}, copy);
+        assert.equal(cut.bodyCount, 2);
+        assert.ok(cut.bodyMetadata.some(body => body.bodyId === importedIds[1]));
+        await unchanged(f, appended, {sameToken:false});
+    } finally { if (f) { assert.equal(await f.stop(), 0); clean(data); } }
+});
 
 test('dedicated STEP registration and upload reject untrusted origins, paths and malformed envelopes before consuming input or geometry', async () => {
     const data = scratch(); let f;
@@ -160,7 +247,7 @@ test('cancelling an already converted STEP waits for actual OS exit and restores
         f.tell('arm-geometry-exit');
         await f.event('geometry-exit-armed', at);
         const pending = upload(f, command, task, bytes);
-        assert.equal((await f.event('step-held', at)).bodyCount, 2);
+        assert.equal((await f.event('step-held', at)).bodyCount, before.model.bodyCount + 2);
         await f.cancel(task);
         await f.event('geometry-exit-held', at);
         assert.equal((await status(f, task)).phase, 'stopping');
@@ -206,11 +293,12 @@ test('STEP commit is non-cancellable and the exact original import receipt survi
         delete original.modelingTask;
         delete original.stepImportStatus;
         assert.deepEqual((await f.get('/documents/default/modeling-tasks/' + task.taskId + '/result')).result, original);
-        assert.equal(fs.existsSync(first.value.features[0].stringParameters.sourcePath), true);
+        assert.equal(first.value.bodyCount, before.model.bodyCount + 2);
+        assert.equal(fs.existsSync(first.value.features.at(-1).stringParameters.sourcePath), true);
         assert.deepEqual(fs.readdirSync(path.join(data, 'pending-step-inputs')), []);
         await f.cad('primitive.box', { width: 1, depth: 1, height: 1, x: 90 });
         const later = await f.cad('document.summary');
-        assert.equal(later.bodyCount, 3);
+        assert.equal(later.bodyCount, before.model.bodyCount + 3);
         await f.stop();
         f = await gatedGeometryGateway(data);
         assert.deepEqual((await f.get('/documents/default/modeling-tasks/' + task.taskId + '/result')).result, original);
@@ -239,7 +327,7 @@ test('STEP statistics-report failure after acceptance cannot convert a committed
         assert.equal(result.value.stepImportStatus.phase, 'complete');
         assert.equal(result.value.stepImportStatus.reportDurable, false);
         assert.ok(result.value.warnings.length);
-        assert.equal(fs.existsSync(result.value.features[0].stringParameters.sourcePath), true);
+        assert.equal(fs.existsSync(result.value.features.at(-1).stringParameters.sourcePath), true);
         assert.equal((await f.get('/documents/default/modeling-tasks/' + task.taskId + '/result')).result.ok, true);
     }
     finally {
@@ -305,9 +393,9 @@ test('Gateway exit after durable STEP commit but before task publication recover
         assert.equal(recovered.phase, 'succeeded');
         assert.equal(recovered.recovered, true);
         const result = (await f.get('/documents/default/modeling-tasks/' + task.taskId + '/result')).result;
-        assert.equal(result.bodyCount, 2);
+        assert.equal(result.bodyCount, before.model.bodyCount + 2);
         assert.equal(result.stepImport.bodyCount, 2);
-        assert.equal(fs.existsSync(result.features[0].stringParameters.sourcePath), true);
+        assert.equal(fs.existsSync(result.features.at(-1).stringParameters.sourcePath), true);
         assert.equal((await f.cad('document.summary')).stateToken, result.stateToken);
         assert.equal(f.events.some(item => item.type === 'fixture.native-request' && item.operation === 'step.import'), false);
     }

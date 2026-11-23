@@ -4,6 +4,8 @@ import * as THREE from 'three';
 import {importTestTypeScript} from './helpers/import-typescript.mjs';
 const {viewportRaycaster,pickViewportBody,pickViewportEdge,viewportPixelSize}=await importTestTypeScript('../app/model/viewport-picking.ts',import.meta.url);
 const {viewportFitDistance,visibleViewportBounds,viewportFov,setViewportDisplay,edgeLayer}=await importTestTypeScript('../app/model/viewport-camera.ts',import.meta.url);
+const {constructionSnapCandidates,pickConstructionSnap}=await importTestTypeScript('../app/modeling/construction-snap.ts',import.meta.url);
+const {constructionFrame,GLOBAL_CONSTRUCTION_COORDINATE}=await importTestTypeScript('../app/modeling/construction-frame.ts',import.meta.url);
 test('shaded mode exposes real edges while the edge selection tool is active',()=>{
   const view=new THREE.PerspectiveCamera();
   setViewportDisplay(view,"shaded"); assert.equal(view.layers.isEnabled(edgeLayer),false);
@@ -27,6 +29,31 @@ test('opaque faces block rear-edge picks while transparent or hidden bodies do n
 test('selection excludes camera-clipped faces and edges and observes transforms before a render frame',()=>{
   const view=camera(),edge=line(9.9999),body=plane(9.9999),target=new THREE.Vector3();
   try{let ray=viewportRaycaster(new THREE.Vector2(),view,1000,target);assert.equal(pickViewportBody(ray,[body],view),undefined);assert.equal(pickViewportEdge(ray,[edge],[],view),undefined);body.position.z=1;ray=viewportRaycaster(new THREE.Vector2(),view,1000,target);assert.ok(pickViewportBody(ray,[body],view));body.position.x=20;assert.equal(pickViewportBody(ray,[body],view),undefined);}finally{dispose(edge,body);}
+});
+
+test('construction snapping uses exact in-plane geometry, a screen aperture, and visible surfaces', () => {
+  const view = camera(), edge = line(), cover = plane();
+  const frame = constructionFrame(GLOBAL_CONSTRUCTION_COORDINATE);
+  edge.userData.snap = { endpoints: [[.125, .25, 0], [1, 1, .01]], midpoint: [.375, .25, 0] };
+  const candidates = constructionSnapCandidates([edge], frame);
+  const mouseAt = (x, y) => {
+    const projected = new THREE.Vector3(x, y, 0).project(view);
+    return new THREE.Vector2(projected.x, projected.y);
+  };
+  const pick = (cursor, occluders = []) => pickConstructionSnap(candidates, cursor, 1000, 1000, view, occluders);
+  try {
+    assert.equal(candidates.length, 2);
+    assert.equal(pick(mouseAt(1, 1)), null);
+    assert.deepEqual(pick(mouseAt(.375, .25)), { x: .375, y: .25, snap: 'midpoint' });
+    const endpoint = mouseAt(.125, .25);
+    assert.deepEqual(pick(endpoint), { x: .125, y: .25, snap: 'endpoint' });
+    assert.equal(pick(endpoint, [cover]), null);
+    cover.material.opacity = .4;
+    assert.equal(pick(endpoint, [cover])?.snap, 'endpoint');
+    assert.equal(pick(endpoint.clone().add(new THREE.Vector2(0, .022))), null);
+    edge.visible = false;
+    assert.equal(pick(endpoint), null);
+  } finally { dispose(edge, cover); }
 });
 test('fit ignores a distant hidden body and keeps all visible bounds inside a narrow view',()=>{
   const shown=new THREE.Mesh(new THREE.BoxGeometry(40,12,13),new THREE.MeshBasicMaterial());

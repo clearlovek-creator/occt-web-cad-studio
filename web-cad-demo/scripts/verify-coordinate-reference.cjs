@@ -130,7 +130,7 @@ async function finishJointRepair(id,before,repair){
     });
     await check('deleting a shared source lets multiple coordinate repairs advance individually without committing the first one',async()=>{
       const id='coordinate_shared_deleted_ui',fixture=await holeFixture(id);await cad(id,'coordinate.set',{id:'second',name:'Second frame',kind:'face',copyReferenceFrom:'attached'});await cad(id,'primitive.box',{width:2,depth:2,height:2,coordinateSystemId:'second'});
-      const before=await cad(id,'document.view');await open(id);const editor=await editFeature('boolean.cut',fixture.cut.features.at(-1).id);await editor.getByRole('button',{name:'删除 Feature',exact:true}).click();await editor.getByRole('button',{name:'确认删除',exact:true}).click();
+      const before=await cad(id,'document.view');await open(id);const editor=await editFeature('boolean.cut',fixture.cut.features.at(-1).id);await editor.getByRole('button',{name:'删除 Feature',exact:true}).click();await page.getByRole('dialog',{name:/^删除特征/}).getByRole('button',{name:'确认删除',exact:true}).click();
       const repair=page.getByTestId('feature-reference-repair'),proposal={operation:'feature.delete',inputs:{featureId:fixture.cut.features.at(-1).id},parameters:{}};const owners=[];
       for(let step=0;step<2;step++){
         await repair.getByRole('alert').filter({hasText:'历史来源'}).waitFor();const owner=await repair.locator('.feature-input-heading > span').innerText();assert.ok(!owners.includes(owner));owners.push(owner);

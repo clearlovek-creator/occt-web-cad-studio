@@ -11,6 +11,7 @@
 #include <TopoDS_Shape.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
 
+#include <iosfwd>
 #include <map>
 #include <string>
 #include <vector>
@@ -136,7 +137,8 @@ public:
                              const std::string& topologyId, const std::string& key);
   std::string ListProperties(const std::string& requestId, const std::string& kind,
                              const std::string& bodyId, const std::string& topologyId) const;
-  std::string ImportStep(const std::string& requestId, const std::string& path);
+  std::string ImportStep(const std::string& requestId, const std::string& path,
+                         const std::string& currentCheckpoint = {});
   // Explicit metadata migration; never invoked by opening or ordinary replay.
   std::string UpgradeImportedNaming(const std::string& requestId, int expectedRevision, bool preview);
   std::string ExportStep(const std::string& requestId, const std::string& path,
@@ -176,6 +178,7 @@ private:
   void initializeDocument();
   void swapState(CadDocument& other) noexcept;
   void persistMetadata();
+  void loadSnapshot(std::istream& input);
   void rebuildFromDocument();
   std::string nextBodyId();
   std::string nextFeatureId();

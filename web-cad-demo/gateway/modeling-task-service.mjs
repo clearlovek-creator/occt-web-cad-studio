@@ -26,12 +26,12 @@ export class ModelingTaskError extends Error {
 const fault = (code, message, status) => new ModelingTaskError(code, message, status);
 /** Task status is not geometry authority; durable project receipts remain so. */
 export class ModelingTaskService {
-    constructor(dataDir, { ownerInstanceId = randomUUID(), resolveOutcome = () => null, maxRecords = 2048, onWarning = console.warn, onTerminal = () => { } } = {}) {
+    constructor(dataDir, { ownerInstanceId = randomUUID(), resolveOutcome = () => null, maxRecords = 2048, onWarning = console.warn, onTerminal = () => { }, onReserved = () => { } } = {}) {
         if (!UUID.test(ownerInstanceId) || !Number.isSafeInteger(maxRecords) || maxRecords < 1 || maxRecords > 4096)
             throw fault('MODELING_TASK_CONFIG_INVALID', '建模任务存储配置无效。', 503);
         this.dataDir = path.resolve(dataDir);
         this.root = path.join(dataDir, 'modeling-tasks');
-        Object.assign(this, { ownerInstanceId, resolveOutcome, maxRecords, onWarning, onTerminal });
+        Object.assign(this, { ownerInstanceId, resolveOutcome, maxRecords, onWarning, onTerminal, onReserved });
         this.records = new Map();
         this.active = new Map();
         this.context = new AsyncLocalStorage();
@@ -139,13 +139,15 @@ export class ModelingTaskService {
         }
     }
     warn(message) { try { this.onWarning(message); } catch { /* Auxiliary diagnostics cannot replace a task or geometry outcome. */ } }
-    reserve(meta,{projectOpenInput,projectSaveInput,projectCreateInput}={}) {
+    reserve(meta,{projectOpenInput,projectSaveInput,projectCreateInput,piApprovalId}={}) {
         this.validateMeta(meta);
         const binding=projectOpenInput===undefined?undefined:this.validateProjectOpenBinding(meta,projectOpenInput);
         const saveBinding=projectSaveInput===undefined?undefined:this.validateProjectSaveBinding(meta,projectSaveInput);
         const createBinding=projectCreateInput===undefined?undefined:this.validateProjectCreateBinding(meta,projectCreateInput);
         const existing = [...this.records.values()].find(record => record.documentId === meta.documentId && record.operation === meta.operation && record.requestKey === meta.requestKey);
         if (existing) {
+            if (existing.piApprovalId !== piApprovalId)
+                throw fault('MODELING_TASK_CONFLICT', '此任务已绑定不同的助手确认。');
             if (existing.digest !== meta.digest)
                 throw fault('MODELING_TASK_CONFLICT', '同一建模请求身份已绑定不同输入。');
             if(binding&&!existing.projectOpenInput)throw fault('MODELING_TASK_CONFLICT','已有任务缺少原文件绑定，不能补造附件身份。');
@@ -158,8 +160,10 @@ export class ModelingTaskService {
         if (this.records.size >= this.maxRecords)
             throw fault('MODELING_TASK_CAPACITY', '建模任务记录已满，请显式删除已完成任务；不会清理未确认结果。', 429);
         const now = date();
-        const { documentId, operation, requestKey, digest, outcomeFingerprint } = meta;
-        return this.publicRecord(this.save({ version: 1, taskId: randomUUID(), ownerInstanceId: this.ownerInstanceId, documentId, operation, requestKey, digest, outcomeFingerprint, phase: 'reserved', sequence: 1, cancelRequested: false, createdAt: now, updatedAt: now,...(binding?{projectOpenInput:binding}:{}),...(saveBinding?{projectSaveInput:saveBinding}:{}),...(createBinding?{projectCreateInput:createBinding}:{}) }));
+        const { documentId, operation, requestKey, digest, outcomeFingerprint, journalRequestId } = meta;
+        const record = this.save({ version: 1, taskId: randomUUID(), ownerInstanceId: this.ownerInstanceId, documentId, operation, requestKey, digest, outcomeFingerprint, journalRequestId, piApprovalId, phase: 'reserved', sequence: 1, cancelRequested: false, createdAt: now, updatedAt: now,...(binding?{projectOpenInput:binding}:{}),...(saveBinding?{projectSaveInput:saveBinding}:{}),...(createBinding?{projectCreateInput:createBinding}:{}) });
+        try { this.onReserved(record); } catch { this.warn('[modeling-task] Auxiliary reservation report failed.'); }
+        return this.publicRecord(record);
     }
     checked(taskId, documentId) {
         this.file(taskId);
@@ -292,7 +296,7 @@ export class ModelingTaskService {
         catch (error) {
             const record = this.records.get(task.taskId), restored = error?.projectRollback?.confirmed === true && error.projectRollback.documentId === record.documentId;
             const unchanged=record.operation==='project.save'&&error?.projectSaveUnchanged?.confirmed===true&&error.projectSaveUnchanged.documentId===record.documentId;
-            const notStarted = task.mode === 'receiving' || ['DOCUMENT_ACTION_CANCELLED', 'DOCUMENT_ACTION_QUEUE_LIMIT', 'DOCUMENT_ACTION_INPUT_LIMIT', 'DOCUMENT_ACTION_QUEUE_TIMEOUT', 'SERVICE_STOPPING'].includes(error?.code) && task.mode === 'queued' || record.operation==='project.open'&&task.mode==='preparing'&&error?.projectOpenNotStarted?.documentId===record.documentId&&error.projectOpenNotStarted.confirmed===true || record.operation==='project.save'&&task.mode==='preparing'&&error?.projectSaveNotStarted?.confirmed===true&&error.projectSaveNotStarted.documentId===record.documentId;
+            const notStarted = task.mode === 'receiving' || ['DOCUMENT_ACTION_CANCELLED', 'DOCUMENT_ACTION_QUEUE_LIMIT', 'DOCUMENT_ACTION_INPUT_LIMIT', 'DOCUMENT_ACTION_QUEUE_TIMEOUT', 'SERVICE_STOPPING'].includes(error?.code) && task.mode === 'queued' || record.operation==='project.open'&&task.mode==='preparing'&&error?.projectOpenNotStarted?.documentId===record.documentId&&error.projectOpenNotStarted.confirmed===true || record.operation==='project.save'&&task.mode==='preparing'&&error?.projectSaveNotStarted?.confirmed===true&&error.projectSaveNotStarted.documentId===record.documentId || Boolean(record.piApprovalId && task.mode === 'preparing' && error?.code?.startsWith('PI_APPROVAL_'));
             const createNotStarted=record.operation==='project.create'&&task.mode==='preparing'&&error?.projectCreateNotStarted?.confirmed===true&&error.projectCreateNotStarted.documentId===record.documentId;
             const cancelled = record.cancelRequested && (notStarted || createNotStarted || (restored||unchanged) && error.code === 'WORKER_CANCELLED');
             if (cancelled)

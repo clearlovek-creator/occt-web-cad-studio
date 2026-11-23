@@ -5,6 +5,7 @@ import {modelingController} from '../modeling/runtime';
 import {startBackupDownload} from '../modeling/backup-download-action';
 import {useBackupMaintenance} from './useBackupMaintenance';
 import {BackupMaintenancePanel} from './BackupMaintenancePanel';
+import {WorkbenchDialog} from './WorkbenchDialog';
 
 const label:Record<ProjectBackupEntry['state'],string>={available:'已发布 · 下载时校验',generating:'正在生成 · 尚未发布',retained:'未完成发布 · 材料保留',unavailable:'材料异常 · 暂不可用'};
 const size=(bytes:number)=>bytes<1024*1024?`${bytes.toLocaleString('zh-CN')} 字节`:`${(bytes/1024/1024).toFixed(1)} MiB`;
@@ -12,6 +13,7 @@ export function ProjectBackupPanel({documentId,busy}:{documentId:string;busy:boo
   const maintenance=useBackupMaintenance(documentId),[view,setView]=useState<'files'|'maintenance'>('files');
   const [catalog,setCatalog]=useState<ProjectBackupCatalog|null>(null),[loading,setLoading]=useState(false),[error,setError]=useState<string|null>(null),[notice,setNotice]=useState<string|null>(null);
   const [action,setAction]=useState<{taskId:string;kind:'download'|'delete';received:number;total:number;stopping?:boolean}|null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<ProjectBackupEntry | null>(null);
   const owner=useRef({alive:true,sequence:0,abort:null as AbortController|null,downloadId:null as string|null});
   const load=useCallback(async(after?:string)=>{
     const current=owner.current,ticket=++current.sequence;current.abort?.abort();const abort=new AbortController();current.abort=abort;setLoading(true);setError(null);
@@ -33,6 +35,17 @@ export function ProjectBackupPanel({documentId,busy}:{documentId:string;busy:boo
     finally{if(current.alive){setAction(null);await load();if(current.alive&&outcome)setError(outcome);}}
   };
   const blocked=busy||loading||Boolean(action);
+  const confirmRemoval = () => {
+    if (blocked || !deleteCandidate?.receipt) return;
+    setDeleteCandidate(null);
+    const current = catalog?.entries.find(entry => entry.taskId === deleteCandidate.taskId);
+    if (modelingController.getSnapshot().documentId !== documentId || !current?.canDelete ||
+        current.receipt?.projectBackup.sha256 !== deleteCandidate.receipt.projectBackup.sha256) {
+      setError('备份状态已变化，请刷新列表并重新选择。');
+      return;
+    }
+    void remove(current);
+  };
   const inspect=(entry:ProjectBackupEntry)=>{setView('maintenance');void maintenance.prepare(entry.entryId);};
   return <section className="project-backups panel-section" data-testid="project-backup-manager" aria-busy={loading}>
     <div className="backup-view-switch" aria-label="备份管理视图"><button type="button" aria-pressed={view==='files'} disabled={Boolean(maintenance.pending)} onClick={()=>setView('files')}>备份文件</button><button type="button" aria-pressed={view==='maintenance'} disabled={Boolean(action)} onClick={()=>setView('maintenance')}>维护清单{maintenance.records.some(record=>record.state==='prepared'||record.state==='isolated')?' · 待处理':''}</button></div>
@@ -44,7 +57,7 @@ export function ProjectBackupPanel({documentId,busy}:{documentId:string;busy:boo
       <strong>{backup?.fileName||(entry.state==='generating'?'正在生成的备份':'保留的备份材料')}</strong>
       {receipt&&backup&&<p className="backup-checkpoint">R{receipt.revision} · {new Date(backup.createdAt).toLocaleString('zh-CN')} · {size(backup.bytes)}</p>}
       <p className="backup-state">{label[entry.state]}{entry.busy&&entry.state!=='generating'?' · 正在使用':''}</p>
-      <div className="backup-actions"><button type="button" disabled={blocked||!entry.canDownload} onClick={()=>void download(entry)}>下载备份</button><button type="button" className="backup-delete" disabled={blocked||!entry.canDelete} onClick={()=>void remove(entry)}>{action?.taskId===entry.taskId&&action.kind==='delete'?'正在删除…':'删除备份文件'}</button></div>
+      <div className="backup-actions"><button type="button" disabled={blocked||!entry.canDownload} onClick={()=>void download(entry)}>下载备份</button><button type="button" className="backup-delete" disabled={blocked||!entry.canDelete||!receipt} onClick={()=>setDeleteCandidate(entry)}>{action?.taskId===entry.taskId&&action.kind==='delete'?'正在删除…':'删除备份文件'}</button></div>
       {(entry.state==='unavailable'||entry.state==='retained')&&<button type="button" className="backup-inspect" disabled={blocked||Boolean(maintenance.pending)||entry.busy} onClick={()=>inspect(entry)}>核对异常材料</button>}
       {reading&&<div className="backup-read-status"><span>{action.stopping?'正在停止读取…':`已读取 ${size(action.received)} / ${size(action.total)}`}</span><button type="button" disabled={action.stopping} onClick={()=>{try{modelingController.cancelProjectBackupDownload(entry.taskId);setAction(value=>value?{...value,stopping:true}:value);}catch(reason){setError(reason instanceof Error?reason.message:'下载状态已变化。');}}}>停止下载</button></div>}
       <details><summary>文件与回执详情</summary><dl><dt>保存任务</dt><dd>{entry.taskId}</dd>{backup&&<><dt>SHA256</dt><dd>{backup.sha256}</dd><dt>校验说明</dt><dd>目录未读取完整文件；下载和删除前会核验原文件长度及摘要。</dd></>}</dl>{entry.state==='available'&&<button type="button" className="backup-inspect" disabled={blocked||Boolean(maintenance.pending)||entry.busy} onClick={()=>inspect(entry)}>核对材料（不删除）</button>}</details>
@@ -54,6 +67,15 @@ export function ProjectBackupPanel({documentId,busy}:{documentId:string;busy:boo
     {catalog?.nextCursor&&<button type="button" className="backup-more" disabled={blocked} onClick={()=>void load(catalog.nextCursor!)}>加载更早的备份</button>}
     <p className="panel-copy">“删除备份文件”仅删除后台这一份文件，不删除当前工程；异常材料须先核对清单，再显式清理。此处不自动生成备份。</p>
     {notice&&<p className="backup-notice" role="status">{notice}</p>}{error&&<p className="exchange-message" role="alert">{error}</p>}
+    {deleteCandidate?.receipt && <WorkbenchDialog title="删除备份文件" onCancel={() => setDeleteCandidate(null)}>
+      <p><strong>{deleteCandidate.receipt.projectBackup.fileName}</strong></p>
+      <p>R{deleteCandidate.receipt.revision} · {new Date(deleteCandidate.receipt.projectBackup.createdAt).toLocaleString('zh-CN')}</p>
+      <p>此操作会永久删除后台的这一份备份，原工程和建模历史仍可继续使用。</p>
+      <div className="exchange-actions">
+        <button type="button" className="feature-delete-confirm" disabled={blocked} onClick={confirmRemoval}>确认删除文件</button>
+        <button type="button" data-initial-focus onClick={() => setDeleteCandidate(null)}>取消</button>
+      </div>
+    </WorkbenchDialog>}
     </>}
   </section>;
 }

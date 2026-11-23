@@ -61,6 +61,7 @@ export function FeatureTree({ features, bodies, activeBodyId, selectedBodyId, se
     </li>;
   })}</ol>;
   return <li role="none" className="feature-tree geometry-tree-pane" data-testid="feature-tree">
+    {bodyFilter.trim() && (bodies.length > 0 || suppressed.length > 0) && !groups.length && !filteredSuppressed.length && <p className="panel-copy">没有匹配的几何或已抑制特征</p>}
     {!bodies.length&&!suppressed.length ? <p className="panel-copy">暂无几何，使用上方创建工具添加。</p> : bodies.length>0&&<ul className="body-feature-tree material-feature-tree" role="group" aria-label="几何体与特征">{groups.map(({ material, members, filtered }) => {
       const flat = !material && groups.length === 1;
       const expanded = flat || Boolean(bodyFilter) || !collapsedMaterials.has(material);

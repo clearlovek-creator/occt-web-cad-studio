@@ -1,6 +1,6 @@
 "use client";
 
-import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export function OperationWindow({
   title,
@@ -20,9 +20,22 @@ export function OperationWindow({
   const panelRef = useRef<HTMLElement>(null);
   const dragRef = useRef<{ x: number; y: number; originX: number; originY: number; minX: number; maxX: number; minY: number; maxY: number } | null>(null);
 
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (!panel || panel.closest("[hidden]")) return;
+    const trigger = document.activeElement;
+    if (!panel.contains(trigger)) panel.focus({ preventScroll: true });
+    return () => {
+      if (panel.contains(document.activeElement) && trigger instanceof HTMLElement && trigger.isConnected) trigger.focus({ preventScroll: true });
+    };
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented && !panelRef.current?.closest("[hidden]") && !(event.target instanceof HTMLSelectElement)) onClose();
+      if (event.key !== "Escape" || event.defaultPrevented || event.repeat || event.isComposing || panelRef.current?.closest("[hidden]")) return;
+      if (event.target instanceof Element && event.target.closest("select, dialog[open]")) return;
+      event.preventDefault();
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -83,6 +96,7 @@ export function OperationWindow({
       role="dialog"
       aria-modal="false"
       aria-label={title}
+      tabIndex={-1}
       data-testid="operation-window"
     >
       <header className="operation-window-header" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={() => { dragRef.current = null; }}>

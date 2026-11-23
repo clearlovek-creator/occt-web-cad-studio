@@ -11,8 +11,11 @@ export class CadMcpTaskError extends Error {
 const jsonHeaders={'Content-Type':'application/json'};
 
 /** Observation deadlines never authorize replay or prove that native work stopped. */
-async function json(fetchImpl,url,init,timeoutMs,limitBytes=32*1024*1024) {
+async function json(fetchImpl,url,init,timeoutMs,limitBytes=32*1024*1024,externalSignal) {
   const controller=new AbortController();let reader,expired=false,timer;
+  const abort=()=>controller.abort();
+  externalSignal?.addEventListener('abort',abort,{once:true});
+  if(externalSignal?.aborted)abort();
   const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{expired=true;controller.abort();reject(Error('CAD task observation expired'));},timeoutMs);});
   const observe=promise=>Promise.race([promise,deadline]);
   try {
@@ -31,13 +34,14 @@ async function json(fetchImpl,url,init,timeoutMs,limitBytes=32*1024*1024) {
     if(!payload||Array.isArray(payload)||typeof payload.ok!=='boolean')throw Error('CAD task response invalid');
     return {response,payload};
   } finally {
-    clearTimeout(timer);controller.abort();if(reader)void reader.cancel().catch(()=>{});
+    clearTimeout(timer);externalSignal?.removeEventListener('abort',abort);controller.abort();if(reader)void reader.cancel().catch(()=>{});
   }
 }
 
 /** One registration and at most one command submission. Cancellation is a separate task control. */
-export async function executeMcpModelingTask({root,command,fetchImpl=fetch,signal,controlMs=5000,commandMs=150000,pollMs=250}) {
-  const encoded=JSON.stringify({...command,requestId:randomUUID()}),input=JSON.parse(encoded),documentId=input.documentId,operation=input.operation;
+export async function executeMcpModelingTask({root,command,fetchImpl=fetch,signal,controlMs=5000,commandMs=150000,pollMs=250,piHeaders,approvalRequired=false}) {
+  const requestId=randomUUID(), batch=command.operation==='project.batch';
+  const encoded=JSON.stringify({...command,requestId,...(batch?{batchId:requestId}:{})}),input=JSON.parse(encoded),documentId=input.documentId,operation=input.operation;
   const collection=`${root}/documents/${encodeURIComponent(documentId)}/modeling-tasks`;
   let task,finished=false,cancelling;
   const error=(code,message,outcome='unknown')=>new CadMcpTaskError(code,message,{outcome,task,requestId:input.requestId});
@@ -89,8 +93,11 @@ export async function executeMcpModelingTask({root,command,fetchImpl=fetch,signa
   const stopped=()=>{void cancel();};signal?.addEventListener('abort',stopped,{once:true});
   try {
     let reservation;
-    try {reservation=await json(fetchImpl,collection,{method:'POST',headers:jsonHeaders,body:JSON.stringify({command:input})},controlMs,65536);}
-    catch {throw error('MCP_TASK_REGISTRATION_UNCONFIRMED','任务登记结果尚未确认，几何命令未发送；请检查任务记录，不会改用直发或重试。','not-started');}
+    try {reservation=await json(fetchImpl,collection,{method:'POST',headers:{...jsonHeaders,...piHeaders},body:JSON.stringify({command:input})},approvalRequired?105000:controlMs,65536,approvalRequired?signal:undefined);}
+    catch {
+      if(signal?.aborted)throw error('MCP_CANCELLED_BEFORE_SEND','助手操作已停止，未发送几何命令。','not-started');
+      throw error('MCP_TASK_REGISTRATION_UNCONFIRMED','任务登记结果尚未确认，几何命令未发送；请检查任务记录，不会改用直发或重试。','not-started');
+    }
     if(!reservation.response.ok||reservation.payload.ok!==true)throw new CadMcpTaskError(reservation.payload.code||'MCP_TASK_REGISTRATION_FAILED',String(reservation.payload.error||'当前后台未接收建模任务，未发送几何命令。').slice(0,1000),{outcome:'not-started',requestId:input.requestId,retryableByModel:!signal?.aborted&&reservation.payload.retryableByModel===true,fieldPath:reservation.payload.fieldPath,selectionPaths:reservation.payload.selectionPaths});
     try {accept(reservation.payload.modelingTask);if(task.phase!=='reserved'||task.reportDurable!==true)throw Error('CAD task not reserved');}
     catch {throw error('MCP_TASK_REGISTRATION_UNCONFIRMED','任务登记凭据与原请求不符，未发送几何命令。','not-started');}
@@ -100,7 +107,7 @@ export async function executeMcpModelingTask({root,command,fetchImpl=fetch,signa
       throw error('MCP_CANCELLED_BEFORE_SEND','停止已请求，几何命令未发送；原登记任务的取消状态请另行核对。','not-started');
     }
     let packet;
-    try {packet=await json(fetchImpl,root+'/commands',{method:'POST',headers:{...jsonHeaders,'X-Cad-Task-Id':task.taskId},body:encoded},commandMs);}
+    try {packet=await json(fetchImpl,root+(batch?'/command-batches':'/commands'),{method:'POST',headers:{...jsonHeaders,...piHeaders,'X-Cad-Task-Id':task.taskId},body:encoded},commandMs);}
     catch {
       try {return await recover();}catch(cause){if(cause instanceof CadMcpTaskError)throw cause;throw error('MCP_TASK_RESULT_UNCONFIRMED','命令回复未确认，原任务或回执暂不可读；不会重新发送几何命令。');}
     }

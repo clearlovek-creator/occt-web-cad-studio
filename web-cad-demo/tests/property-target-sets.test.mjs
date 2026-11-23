@@ -17,10 +17,15 @@ function schema(policy='review',anchors=[anchor(1)]){return {schemaVersion:2,typ
 
 test('multiple associations use an explicit v2 schema, preserve legacy bytes and reject incomplete/duplicate edits atomically',()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'cad-property-sets-'));try{const store=new PropertySchemaStore(root),old=store.createType('legacy',{key:'Old',targetScope:'face',association:'required',fields:[]});store.createInstance('legacy',{typeId:old.typeId,target:anchor(1),value:{}});const bytes=fs.readFileSync(store.filePath('legacy'));new PropertySchemaStore(root).list('legacy');assert.deepEqual(fs.readFileSync(store.filePath('legacy')),bytes);assert.equal(store.list('legacy').schemaVersion,1);
-    const type=store.createType('new',{key:'Boundary',targetScope:'face',association:'required',targetMode:'multiple',splitPolicy:'all-descendants',fields:[]}),instance=store.createInstance('new',{typeId:type.typeId,targets:[anchor(1),anchor(2)],value:{}});assert.equal(store.list('new').schemaVersion,2);assert.equal(instance.targets.length,2);assert.equal(instance.target,null);const before=store.list('new'),disk=fs.readFileSync(store.filePath('new'));
+    const type=store.createType('new',{key:'Boundary',targetScope:'face',association:'required',targetMode:'multiple',fields:[]}),instance=store.createInstance('new',{typeId:type.typeId,targets:[anchor(1),anchor(2)],value:{}});assert.equal(type.splitPolicy,'all-descendants');assert.equal(store.list('new').schemaVersion,2);assert.equal(instance.targets.length,2);assert.equal(instance.target,null);const before=store.list('new'),disk=fs.readFileSync(store.filePath('new'));
     for(const targets of [[],[null],[anchor(1),anchor(1)],[{kind:'edge',bodyId:'body-1',topologyId:'edge-1-1'}],Array.from({length:257},(_,i)=>anchor(i+1))])assert.throws(()=>store.updateInstance('new',{instanceId:instance.instanceId,name:'Must not leak',targets}));assert.deepEqual(store.list('new'),before);assert.deepEqual(fs.readFileSync(store.filePath('new')),disk);
     assert.throws(()=>store.updateType('new',{typeId:type.typeId,splitPolicy:'review'}),/immutable/);assert.throws(()=>store.validateSnapshot({...before,schemaVersion:1}),/schemaVersion 2/);assert.throws(()=>store.updateInstance('legacy',{instanceId:store.list('legacy').instances[0].instanceId,targets:[anchor(1)]}),/multiple-target/);
     const exported=store.exportTypes('new');assert.equal(exported.schemaVersion,2);store.importTypes('copy',{package:exported});assert.equal(store.list('copy').types[0].splitPolicy,'all-descendants');assert.throws(()=>store.importTypes('bad',{package:{...exported,schemaVersion:1}}),/Invalid/);
+    const edge = {key:'EdgeSet',targetScope:'edge',targetMode:'multiple'};
+    assert.equal(store.createType('copy',edge).splitPolicy,'all-descendants');
+    assert.equal(store.createType('copy',{...edge,key:'ReviewSet',splitPolicy:'review'}).splitPolicy,'review');
+    assert.equal(store.createType('copy',{...edge,key:'BodySet',targetScope:'body'}).splitPolicy,'review');
+    assert.equal(store.importTypes('historical',{package:{...exported,types:[edge]}}).imported[0].splitPolicy,'review');
   }finally{assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(root,{recursive:true,force:true});}
 });
 

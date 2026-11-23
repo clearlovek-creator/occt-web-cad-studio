@@ -11,25 +11,32 @@ import {selectBackendRelease, validateBackendRelease} from '../gateway/backend-r
 import {selectRelease} from '../gateway/frontend-release.mjs';
 import {selectNativeTestRuntime} from './test-native-runtime.mjs';
 import {gatedGeometryGateway} from '../tests/helpers/gated-geometry-gateway.mjs';
+import {stopTestChild} from '../tests/helpers/stop-test-child.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const backendRoot = path.resolve(process.env.CAD_TEST_BACKEND_RELEASE_ROOT || '.artifacts/step-task-backend-releases');
 const frontendRoot = path.resolve(process.env.LOFT_UI_RELEASE_ROOT || '.artifacts/step-task-ui-releases');
 const backend = selectBackendRelease(backendRoot, process.env.CAD_TEST_BACKEND_RELEASE_ID), frontend = selectRelease(frontendRoot, root), native = selectNativeTestRuntime(root);
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cad-step-task-browser-')), data = path.join(scratch, 'data'), runtime = path.join(scratch, 'runtime');
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cad-step-task-browser-')), data = path.join(scratch, 'data');
 const artifacts = path.resolve(process.env.STEP_TASK_UI_ARTIFACTS || '.artifacts/step-task-browser-first');
 fs.mkdirSync(data); fs.mkdirSync(artifacts, {recursive: true});
 const server = net.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const frontendPort = server.address().port; await new Promise(resolve => server.close(resolve));
 const url = `http://localhost:${frontendPort}/`;
-let f, browser, page, frontStarted = false, verified = false;
+let f, browser, page, frontendProcess, verified = false;
 const checks = [], errors = [], uploads = [], control = [];
-async function front(action) {
-  const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts/start-web-cad-demo.ps1'), '-Action', action, '-Service', 'Frontend', '-FrontendPort', String(frontendPort), '-GatewayPort', String(f.port), '-DataDirectory', data, '-RuntimeDirectory', runtime, '-FrontendReleaseRoot', frontendRoot, '-FrontendReleaseId', frontend.releaseId, '-AsJson'], {cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']});
-  let output = '', diagnostics = '';
-  child.stdout.on('data', bytes => output += bytes); child.stderr.on('data', bytes => diagnostics = (diagnostics + bytes).slice(-16384));
-  const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
-  assert.equal(code, 0, diagnostics); return JSON.parse(output);
+async function startFrontend() {
+  frontendProcess = spawn(process.execPath, ['scripts/frontend-launch.mjs', '--release', frontend.directory, '--port', String(frontendPort), '--gateway-api', f.api], {cwd: root, windowsHide:true, stdio:['ignore','pipe','pipe']});
+  let diagnostics = '', startupError;
+  frontendProcess.on('error', error => startupError = error);
+  frontendProcess.stdout.on('data', bytes => diagnostics = (diagnostics + bytes).slice(-16384));
+  frontendProcess.stderr.on('data', bytes => diagnostics = (diagnostics + bytes).slice(-16384));
+  await f.until(async () => {
+    if (startupError) throw startupError;
+    assert.equal(frontendProcess.exitCode, null, diagnostics);
+    const health = await fetch(new URL('/__cad/health', url)).then(response => response.json()).catch(() => null);
+    return health?.ok && health.releaseId === frontend.releaseId;
+  }, 'Frozen frontend did not start', 20000);
 }
 async function check(name, action) { await action(); checks.push(name); console.log('PASS ' + name); }
 const strip = () => page.getByTestId('modeling-task-status');
@@ -53,8 +60,9 @@ async function choose(bytes, name) {
 }
 async function active(phase) { await page.locator(`[data-testid="modeling-task-status"][data-phase="${phase}"]`).waitFor(); return strip().getAttribute('data-task-id'); }
 async function heldImport(bytes, name) {
+  const before = (await f.cad('document.summary')).bodyCount;
   const at = f.events.length; f.tell('arm-step'); await f.event('step-armed', at); await choose(bytes, name);
-  assert.equal((await f.event('step-held', at)).bodyCount, 2);
+  assert.equal((await f.event('step-held', at)).bodyCount, before + 2);
   return {at, taskId: await active('executing')};
 }
 async function cancelHeld(at) {
@@ -78,7 +86,7 @@ try {
   await f.cad('property.set', {key: 'stepBrowserMarker', type: 'int', value: 39}, {kind: 'body', bodyId: body.bodyId});
   await f.cad('variable.set', {name: 'stepBrowserSize', type: 'length', expression: '12 mm'});
   const baseline = await state();
-  frontStarted = true; await front('Start');
+  await startFrontend();
   browser = await chromium.launch({executablePath: process.env.WORKBENCH_CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader']});
   page = await browser.newPage({viewport: {width: 1440, height: 1000}}); page.setDefaultTimeout(20000);
   page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => void dialog.accept());
@@ -134,13 +142,14 @@ try {
     assert.equal(await report().count(), 0); await cancelHeld(at); await sameProject(baseline); await visibleBodies(1);
     assert.deepEqual(fs.readdirSync(path.join(data, 'pending-step-inputs')), []); assert.deepEqual(fs.readdirSync(path.join(data, 'imports')), []);
   });
-  await check('durable STEP publication disables cancel and the completed import report matches two actually rendered Bodies', async () => {
+  await check('durable STEP publication disables cancel, reports two new Bodies and renders the original Body alongside them', async () => {
     const {at} = await heldImport(bytes, '提交边界.step'); f.tell('arm-task-commit'); await f.event('task-commit-armed', at); f.tell('release-geometry');
     await f.event('task-commit-held', at); await active('committing');
     assert.equal(await strip().getByRole('button', {name: '取消操作', exact: true}).isDisabled(), true);
     await strip().getByText('正在写入完整工程，暂不可取消。', {exact: true}).waitFor();
     await strip().screenshot({path: path.join(artifacts, 'committing.png')}); f.tell('release-geometry');
-    await visibleBodies(2); await report().waitFor(); assert.equal((await state()).model.bodyCount, 2);
+    await visibleBodies(3); await report().waitFor(); assert.equal((await state()).model.bodyCount, 3);
+    await report().getByText(/导入报告 · 2 个 Body/).waitFor();
   });
   await check('a lost successful upload response recovers its original receipt without a second upload and updates the viewport', async () => {
     const count = uploads.length, handler = async route => { await route.fetch(); await route.abort('failed'); };
@@ -148,16 +157,49 @@ try {
     try {
       await choose(bytes, '回执恢复.step');
       await f.until(async () => uploads.length === count + 1 && control.some(item => item.path.endsWith('/' + uploads.at(-1).taskId + '/result')), 'Original task receipt was not requested');
-      await report().getByText('回执恢复.step', {exact: true}).waitFor(); await visibleBodies(2); assert.equal(uploads.length, count + 1);
+      await report().getByText('回执恢复.step', {exact: true}).waitFor(); await visibleBodies(5); assert.equal(uploads.length, count + 1);
       const result = await f.get('/documents/default/modeling-tasks/' + uploads.at(-1).taskId); assert.equal(result.modelingTask.phase, 'succeeded');
+      const identity = uploads.at(-1);
+      const journal = page.getByTestId('command-journal');
+      const journalButton = page.getByRole('button', {name:/^命令日志/});
+      await journalButton.click();
+      const entry = journal.locator('details').filter({hasText:identity.taskId});
+      await entry.locator('summary').getByText(/^完成/).waitFor();
+      assert.equal(await entry.count(), 1);
+      assert.ok((await entry.textContent()).includes(identity.requestId));
+      await journalButton.click();
     } finally { await page.unroute('**/imports/step', handler); }
+  });
+  await check('undo and redo affect only the latest STEP append while the original Body stays in the viewport', async () => {
+    const before = await state();
+    await page.getByRole('tab', {name:'工程',exact:true}).click();
+    await page.locator('[data-command="edit.undo"]').click();
+    await visibleBodies(3);
+    const undone = await state();
+    assert.deepEqual(undone.model.features, before.model.features.slice(0,-1));
+    assert.deepEqual(undone.raw, baseline.raw);
+    assert.deepEqual(undone.typed, baseline.typed);
+    await page.locator('[data-command="edit.redo"]').click();
+    await visibleBodies(5);
+    assert.deepEqual((await state()).model.features, before.model.features);
   });
   await check('page reload restores the same converting task and cancellation does not upload or execute STEP again', async () => {
     const before = await state(), count = uploads.length, sources = fs.readdirSync(path.join(data, 'imports'));
     const {at, taskId} = await heldImport(bytes, '刷新后取消.step');
     await page.reload({waitUntil: 'domcontentloaded'});
+    const journal = page.getByTestId('command-journal');
+    const journalButton = page.getByRole('button', {name:/^命令日志/});
+    await journalButton.click();
+    const entry = journal.locator('details').filter({hasText:taskId});
+    await entry.locator('summary').click();
+    const lookup = page.waitForRequest(request => new URL(request.url()).searchParams.get('requestId') === uploads.at(-1).requestId
+      && new URL(request.url()).pathname.endsWith('/command-journal'));
+    await entry.getByRole('button', {name:'核对结果'}).click();
+    assert.equal((await lookup).method(), 'GET');
+    await journal.getByText('原请求仍在执行。', {exact:true}).waitFor();
+    await journalButton.click();
     await page.locator(`[data-testid="modeling-task-status"][data-task-id="${taskId}"][data-phase="executing"]`).waitFor();
-    assert.equal(uploads.length, count + 1); await cancelHeld(at); await sameProject(before); await visibleBodies(2);
+    assert.equal(uploads.length, count + 1); await cancelHeld(at); await sameProject(before); await visibleBodies(5);
     assert.equal(uploads.length, count + 1); assert.deepEqual(fs.readdirSync(path.join(data, 'imports')), sources);
     for (const width of [1440, 640]) { await page.setViewportSize({width, height: 1000}); await page.screenshot({path: path.join(artifacts, `cancelled-${width}.png`), fullPage: true}); }
   });
@@ -168,9 +210,11 @@ try {
   if (page) { await page.screenshot({path: path.join(artifacts, 'failure.png'), fullPage: true}).catch(() => {}); console.error((await page.locator('body').innerText().catch(() => '')).slice(-9000)); }
   throw error;
 } finally {
-  await browser?.close(); let frontendStopped = !frontStarted;
-  if (frontStarted) { const stopped = await front('Stop'); frontendStopped = stopped.Services.every(service => service.State === 'stopped'); }
-  const code = f ? await f.stop() : null;
+  await browser?.close();
+  const [frontendStop, gatewayStop] = await Promise.allSettled([stopTestChild(frontendProcess), f ? f.stop() : null]);
+  const frontendStopped = frontendStop.status === 'fulfilled', code = gatewayStop.status === 'fulfilled' ? gatewayStop.value : null;
   if (verified && frontendStopped && code === 0) { assert.equal(path.dirname(scratch), path.resolve(os.tmpdir())); assert.ok(path.basename(scratch).startsWith('cad-step-task-browser-')); fs.rmSync(scratch, {recursive: true, force: true}); }
   else console.error('Preserved STEP task browser diagnostics: ' + scratch);
+  if (!frontendStopped) throw frontendStop.reason;
+  if (gatewayStop.status === 'rejected') throw gatewayStop.reason;
 }

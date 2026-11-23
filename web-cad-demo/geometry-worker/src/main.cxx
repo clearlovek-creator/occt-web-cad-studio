@@ -48,7 +48,8 @@ std::string errorJson(const std::string& requestId, const std::string& code, con
        + "\",\"code\":\"" + JsonEscape(code) + "\",\"error\":\"" + JsonEscape(message) + "\"" + (details.empty() ? "" : ",\"details\":" + details) + "}";
 }
 
-std::string dispatch(DocumentManager& manager, const JsonValue& request,const NativeResourceGuard& resourceGuard)
+std::string dispatch(DocumentManager& manager, const JsonValue& request,const NativeResourceGuard& resourceGuard,
+                     const std::string& currentCheckpoint = {})
 {
   if (!request.IsObject()) throw CadError("INVALID_REQUEST", "Request must be a JSON object.");
   if (request.GetIntegerOr("protocolVersion", 0) != 1)
@@ -162,7 +163,7 @@ std::string dispatch(DocumentManager& manager, const JsonValue& request,const Na
   if (operation == "property.list")
     return document.ListProperties(requestId, inputs.GetStringOr("kind", ""),
                                    inputs.GetStringOr("bodyId", ""), inputs.GetStringOr("topologyId", ""));
-  if (operation == "step.import") return document.ImportStep(requestId, parameters.GetString("path"));
+  if (operation == "step.import") return document.ImportStep(requestId, parameters.GetString("path"), currentCheckpoint);
   if (operation == "step.export") return document.ExportStep(requestId, parameters.GetString("path"),
                                      parameters.GetStringOr("bodyId", ""),
                                      parameters.GetStringOr("selectionType", ""),
@@ -231,7 +232,7 @@ std::string dispatchTransactional(DocumentManager& manager, const JsonValue& req
   {
     document.SaveSnapshot("transaction-checkpoint", checkpointPath);
     checkpointSaved = true;
-    const std::string result = dispatch(manager, request,resourceGuard);
+    const std::string result = dispatch(manager, request, resourceGuard, checkpointPath);
     const int afterRevision = document.Revision();
     std::error_code ignored;
     std::filesystem::remove(checkpoint, ignored);

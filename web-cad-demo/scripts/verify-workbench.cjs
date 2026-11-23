@@ -82,9 +82,10 @@ async function assertModelVisible() {
       const projection = page.getByLabel('投影方式', { exact: true });
       const frame = page.getByLabel('构造坐标系', { exact: true });
       const step = page.getByLabel('构造平面吸附步长', { exact: true });
+      const snap = page.getByRole('button', { name:'几何吸附', exact:true });
       const settings = page.getByRole('button', { name:'面板设置', exact:true });
       const y = await centerY(projection);
-      for (const control of [frame, step, settings]) assert.ok(Math.abs(await centerY(control) - y) < 3);
+      for (const control of [frame, step, snap, settings]) assert.ok(Math.abs(await centerY(control) - y) < 3);
       await page.setViewportSize({ width: 390, height: 760 });
       const assistant = page.getByRole('button', { name:'AI 助手', exact:true });
       await page.route('**/api/pi/sessions**', route => route.fulfill({ status:503, json:{ok:false,error:'fixture'} }));
@@ -659,7 +660,15 @@ async function assertModelVisible() {
       await page.getByRole('tab', { name: '变换', exact: true }).click();
       for (const kind of ['translate', 'rotate', 'mirror', 'copy', 'coordinate', 'align', 'scale', 'scale_non_uniform']) { await page.locator('[data-command="transform.' + kind + '"]').click(); assert.equal(await page.getByLabel('变换类型', { exact: true }).inputValue(), kind); await close(); }
       await page.getByRole('tab', { name: '布尔', exact: true }).click();
-      for (const kind of ['fuse', 'cut', 'common', 'section', 'split', 'partition', 'fragments', 'imprint']) { await page.locator('[data-command="boolean.' + kind + '"]').click(); assert.equal(await page.locator('.advanced-boolean select').first().inputValue(), kind); await close(); }
+      for (const kind of ['fuse', 'cut', 'common', 'section', 'split', 'partition', 'fragments', 'imprint']) {
+        await page.locator('[data-command="boolean.' + kind + '"]').click();
+        const panel = page.locator('.studio-right-dock .advanced-boolean');
+        assert.equal(await panel.getByLabel('Boolean 操作').inputValue(), kind);
+        const keep = panel.getByRole('checkbox', {name: /^保留 Tool/});
+        assert.equal(await keep.isChecked(), kind === 'imprint');
+        assert.equal(await keep.isDisabled(), kind === 'imprint');
+        await close();
+      }
       await page.getByRole('tab', { name: '建模', exact: true }).click();
       for (const kind of ['sweep', 'pipe', 'loft']) { await page.locator('[data-command="feature.' + kind + '"]').click(); if(kind==='loft'){const panel=page.getByTestId('loft-modeling-panel');assert.ok(await panel.getByRole('heading',{name:'真实截面放样',exact:true}).isVisible());assert.equal(await panel.getByLabel('放样截面放置方式',{exact:true}).inputValue(),'actual');assert.equal(await panel.getByRole('button',{name:'创建放样',exact:true}).isDisabled(),true);}else assert.ok(await page.getByTestId('sweep-modeling-panel').isVisible()); await close(); }
     });
@@ -677,7 +686,17 @@ async function assertModelVisible() {
       assert.equal(await field.inputValue(), 'boardWidth + 10 mm');
       await page.screenshot({ path: path.join(screenshots, 'dialog.png'), fullPage: true }); await close();
     });
-    await check('project save, new and open actions reach the real geometry service', async () => {
+    const switchDialog = page.getByRole('dialog', {name: '当前工程有未保存的更改'});
+    const currentId = () => page.locator('main.cad-shell').getAttribute('data-document-id');
+    const switchWithoutSaving = async (trigger) => {
+      const id = await currentId();
+      const {project: source} = await fetch(api + '/projects/' + id).then(response => response.json());
+      await trigger();
+      if (source.hasChangesSinceExport) await switchDialog.getByRole('button', {name:'直接切换'}).click();
+      await page.waitForFunction(previous => document.querySelector('main.cad-shell').dataset.documentId !== previous, id);
+    };
+    const newProject = () => switchWithoutSaving(() => page.locator('[data-command="file.new"]').click());
+    await check('project switch, first save and save-as use a single guarded flow', async () => {
       // Earlier window/layout checks open an actual local Pi process. Closing
       // its panel is not a proof that it is idle; stop only this fixture's
       // managed sessions and verify the real workspace guard before transfer.
@@ -687,13 +706,45 @@ async function assertModelVisible() {
       const idlePi=await fetch(api+'/pi/documents/'+encodeURIComponent(fixtureDocument)+'/activity').then(r=>r.json());assert.equal(idlePi.activity.status,'idle');assert.equal(idlePi.activity.guarded,false);
       await page.getByRole('tab', { name: '工程', exact: true }).click();
       await page.locator('[data-command="file.save"]').click();
-      const naming = page.getByRole('dialog', {name:'保存工程',exact:true});
+      const naming = page.getByRole('dialog', {name:'保存前命名工程',exact:true});
       await naming.getByLabel('工程名称',{exact:true}).waitFor();
       assert.equal(await naming.getByRole('button',{name:'命名并保存'}).isDisabled(),true);
       await naming.getByRole('button',{name:'取消',exact:true}).click();
       assert.equal((await (await fetch(api+'/projects/'+fixtureDocument)).json()).project.name,'未命名工程');
+      await page.getByRole('tab',{name:'数据',exact:true}).click();
       await page.locator('[data-command="file.exchange"]').click();
       await page.getByTestId('step-exchange').getByRole('button',{name:'保存工程',exact:true}).click();
+      await naming.getByLabel('工程名称',{exact:true}).waitFor();
+      await page.keyboard.press('Escape');
+      await naming.waitFor({state:'hidden'});
+      await page.getByTestId('step-exchange').waitFor();
+      await close();
+      await page.getByRole('tab',{name:'工程',exact:true}).click();
+      const sourceId = await currentId();
+      const source = (await fetch(api + '/projects/' + sourceId).then(response => response.json())).project;
+      await page.locator('[data-command="file.saveAs"]').click();
+      const copyDialog = page.getByRole('dialog', {name:'另存为',exact:true});
+      await copyDialog.getByLabel('工程名称').fill('浏览器副本');
+      const copyDownload = page.waitForEvent('download');
+      await copyDialog.getByRole('button',{name:'下载副本'}).click();
+      const copy = await copyDownload;
+      assert.equal(copy.suggestedFilename(),'浏览器副本.cadproj');
+      assert.equal(decodeProjectPackage(fs.readFileSync(await copy.path())).metadata.document.name,'浏览器副本');
+      assert.equal(await currentId(),sourceId);
+      const unchanged = (await fetch(api + '/projects/' + sourceId).then(response => response.json())).project;
+      assert.equal(unchanged.name,source.name);
+      assert.equal(unchanged.hasChangesSinceExport,true);
+      assert.equal(unchanged.token,source.token);
+      assert.equal(unchanged.lastGeneratedAt,source.lastGeneratedAt);
+      await page.locator('[data-command="file.new"]').click();
+      await switchDialog.waitFor();
+      assert.equal(await switchDialog.getByRole('button',{name:'取消',exact:true}).evaluate(button => button === document.activeElement),true);
+      await switchDialog.getByRole('button',{name:'保存后切换'}).click();
+      await naming.getByLabel('工程名称',{exact:true}).waitFor();
+      await page.keyboard.press('Escape');
+      assert.equal(await currentId(),fixtureDocument);
+      await page.locator('[data-command="file.new"]').click();
+      await switchDialog.getByRole('button',{name:'保存后切换'}).click();
       await naming.getByLabel('工程名称',{exact:true}).fill('浏览器验证工程');
       const saved = page.waitForEvent('download');
       await naming.getByRole('button',{name:'命名并保存'}).click();
@@ -703,21 +754,26 @@ async function assertModelVisible() {
       assert.equal(backup.legacy, false);
       assert.equal(backup.metadata.document.id, fixtureDocument);
       assert.equal(file.suggestedFilename(),'浏览器验证工程.cadproj');
-      await page.locator('[data-command="file.new"]').click(); await geometry.getByText('暂无几何，使用上方创建工具添加。', { exact: true }).waitFor();
+      await page.waitForFunction(previous => document.querySelector('main.cad-shell').dataset.documentId !== previous, fixtureDocument);
+      await geometry.getByText('暂无几何，使用上方创建工具添加。', { exact: true }).waitFor();
       assert.equal(await geometry.locator('[data-body-id]').count(), 0);
-      await page.locator('input[accept^=".cadproj"]').setInputFiles({ name: 'ui-test-project.cadproj', mimeType: 'application/vnd.webcad.project', buffer: savedBytes });
+      await switchWithoutSaving(() => page.locator('input[accept^=".cadproj"]').setInputFiles({ name: 'ui-test-project.cadproj', mimeType: 'application/vnd.webcad.project', buffer: savedBytes }));
       await geometry.locator('[data-body-id="' + box.bodyId + '"]').waitFor(); assert.equal(await geometry.locator('[data-body-id]').count(), 2);
       await project.getByRole('button',{name:'Thermal2操作',exact:true}).waitFor();
       await assertModelVisible();
       await page.getByRole('tab', { name: '建模', exact: true }).click();
     });
-    await check('Body context menu activates and deletes without extra confirmation cards', async () => {
+    await check('Body context menu activates and asks before deleting', async () => {
       await geometry.getByRole('button', { name: 'Substrate操作', exact: true }).click(); await page.getByRole('menuitem', { name: '设为当前 Body', exact: true }).click();
       const body = geometry.locator('[data-body-id="' + box.bodyId + '"]'); await body.getByText('当前', { exact: true }).waitFor();
       await page.getByTestId('selection-readout').getByText(`体拾取 · ${box.bodyId}`, {exact:true}).waitFor();
       await geometry.getByRole('button', { name: 'Substrate操作', exact: true }).click(); await page.getByRole('menuitem', { name: '删除 Body', exact: true }).click();
+      const confirmation = page.getByRole('dialog', {name:/^删除 Body Substrate/});
+      await confirmation.getByRole('button',{name:'取消',exact:true}).click();
+      assert.equal(await body.count(),1);
+      await geometry.getByRole('button', { name: 'Substrate操作', exact: true }).click(); await page.getByRole('menuitem', { name: '删除 Body', exact: true }).click();
+      await confirmation.getByRole('button',{name:'确认删除',exact:true}).click();
       await body.waitFor({ state: 'detached' }); assert.equal(await geometry.locator('[data-body-id]').count(), 1);
-      assert.equal(await page.locator('.body-delete-confirm').count(), 0);
       await page.waitForFunction(() => !document.querySelector('[data-testid="selection-readout"]').textContent.includes('body-1'));
     });
     await check('reference-grid drag previews and creates a snapped solid in the active document', async () => {
@@ -747,6 +803,10 @@ async function assertModelVisible() {
       await page.mouse.click(bounds.x + bounds.width * .5, bounds.y + bounds.height * .5 - 70);
       await page.waitForFunction((count) => document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length === count + 1, before);
       assert.equal((await command('document.view')).bodyCount, before + 1);
+      await page.getByLabel('拖拽建模类型', { exact: true }).waitFor({ state: 'detached' });
+      await page.mouse.click(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+      await page.mouse.move(bounds.x + bounds.width * 0.6, bounds.y + bounds.height * 0.4);
+      assert.equal(await page.locator('.drag-modeling-feedback').count(), 0, 'A click after success must not start a second drawing');
       const cameraAfter = await viewport.evaluate(node => { node.dispatchEvent(new Event('cad:verify-frame')); return JSON.parse(node.dataset.cameraPose); });
       cameraBefore.forEach((value,index) => assert.ok(Math.abs(value-cameraAfter[index]) < 1e-5, 'Drag commit must preserve the camera and construction-plane placement'));
       await page.getByRole('button', { name: '参数建模', exact: true }).click();
@@ -754,17 +814,18 @@ async function assertModelVisible() {
     await close();
     await check('a landing click with sub-four-pixel jitter never locks a footprint or creates a sphere',async()=>{
       const before=await command('document.view');
-      await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
+      const dragToggle=page.getByRole('button',{name:'拖拽建模',exact:true});
       const viewport=page.getByTestId('cad-viewport'),bounds=await viewport.boundingBox();
       const x=bounds.x+bounds.width*.4,y=bounds.y+bounds.height*.55;
       for(const kind of ['box','sphere','surface-disk']){
+        await dragToggle.click();
         await page.getByLabel('拖拽建模类型',{exact:true}).selectOption(kind);
         await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+2,y-2);await page.mouse.up();
         assert.match(await page.locator('.viewport-hint').innerText(),/2\/[23]/,'A jittered landing click must leave footprint selection active');
         assert.equal((await command('document.summary')).revision,before.revision);
         await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.querySelector('.drag-modeling-kind'));
       }
-      await page.getByRole('button',{name:'参数建模',exact:true}).click();await close();
     });
     await check('click-move-click locks footprint; shortcut preserves dimensions in the parameter form', async () => {
       const before = await command('document.view');
@@ -796,7 +857,6 @@ async function assertModelVisible() {
       // The shortcut must work while the edited expression input still owns focus.
       await page.keyboard.press('Alt+m');
       await panel.waitFor({state:'detached'});
-      await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
       await page.keyboard.press('Alt+m');
       await panel.waitFor();
       assert.equal(await panel.getByLabel('长度 X',{exact:true}).inputValue(),'boardWidth + 2 mm','A parameter/drag/parameter round trip must preserve expressions as well as numbers');
@@ -846,6 +906,7 @@ async function assertModelVisible() {
       await page.mouse.click(x+65,y-45,{button:'right'});
       assert.equal(await page.locator('.drag-modeling-feedback').count(),0);
       assert.equal(await page.locator('.viewport-context-menu').count(),0);
+      assert.equal(await page.getByRole('button',{name:'拖拽建模',exact:true}).getAttribute('aria-pressed'),'false');
       await page.getByRole('button',{name:'参数建模',exact:true}).click();
       const panel=page.getByTestId('advanced-modeling-panel');
       await panel.getByLabel('长度 X',{exact:true}).fill('boardWidth + 7 mm');
@@ -876,13 +937,18 @@ async function assertModelVisible() {
       assert.equal((await command('document.summary')).revision,before.revision,'Returning to a stage or editing a draft must not commit');
       await close();
     });
-    await check('all fourteen drag tools complete their footprint/height stages and Esc never creates geometry',async()=>{
-      await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
+    await check('all fourteen drag tools exit after creating one shape and cancellation restores normal picking',async()=>{
+      const dragToggle=page.getByRole('button',{name:'拖拽建模',exact:true});
+      const dragKind=page.getByLabel('拖拽建模类型',{exact:true});
+      await dragToggle.click();
+      await page.getByRole('tab',{name:'建模',exact:true}).click();
       for(const kind of ['box','cylinder','cone','sphere','torus','wedge','prism','pyramid','tube','surface-rectangle','surface-disk','surface-cylinder','surface-cone','surface-sphere']){
-        await page.getByLabel('拖拽建模类型',{exact:true}).selectOption(kind);await page.locator('[title="顶视图"]').click();
+        const operation=kind.startsWith('surface-')?kind.replace('-','.'):'primitive.'+kind;
+        await page.locator(`[data-command="${operation}"]`).click();
+        assert.equal(await dragKind.inputValue(),kind,'A new Ribbon command must arm one drawing of the selected shape');
+        await page.locator('[title="顶视图"]').click();
         const bounds=await page.getByTestId('cad-viewport').boundingBox(),x=bounds.x+bounds.width*.35,y=bounds.y+bounds.height*.55;
         const before=await command('document.summary');
-        const operation=kind.startsWith('surface-')?kind.replace('-','.'):'primitive.'+kind;
         const creation=page.waitForResponse(response=>response.url().endsWith('/commands') && response.request().postDataJSON()?.operation===operation,{timeout:30000}).then(async response=>{
           const parameters=response.request().postDataJSON()?.parameters;
           // A stale view matrix once turned a 65px footprint into an 8m radius.
@@ -901,15 +967,34 @@ async function assertModelVisible() {
         const after=await command('document.summary');assert.equal(after.bodyCount,before.bodyCount+1,kind);
         assert.equal(after.features.at(-1).type,operation);
         assert.equal(await page.locator('.drag-dimension-readout').count(),0);
+        await dragKind.waitFor({state:'detached'});
+        assert.equal(await dragToggle.getAttribute('aria-pressed'),'false',`${kind} must leave drag mode after success`);
       }
-      const before=await command('document.summary');await page.getByLabel('拖拽建模类型',{exact:true}).selectOption('box');
+      const before=await command('document.summary');await dragToggle.click();await dragKind.selectOption('box');
       const bounds=await page.getByTestId('cad-viewport').boundingBox(),x=bounds.x+bounds.width*.3,y=bounds.y+bounds.height*.5;
       await page.mouse.click(x,y);await page.mouse.move(x+65,y-45,{steps:4});await page.mouse.click(x+65,y-45);await page.mouse.move(x+65,y-100,{steps:4});
-      await page.keyboard.press('Escape');assert.equal(await page.locator('.drag-dimension-readout').count(),0);assert.equal((await command('document.summary')).revision,before.revision);
+      const settings=page.getByRole('button',{name:'面板设置',exact:true});
+      await settings.click();await page.keyboard.press('Escape');
+      assert.equal(await dragToggle.getAttribute('aria-pressed'),'true');
+      assert.equal(await page.locator('.drag-dimension-readout').count(),1,'Closing the popup must preserve the draft');
+      await page.keyboard.press('Escape');
+      assert.equal(await dragToggle.getAttribute('aria-pressed'),'false');
+      assert.equal(await page.locator('.drag-dimension-readout').count(),0);
+      assert.equal((await command('document.summary')).revision,before.revision);
+      await page.mouse.click(x,y);await page.mouse.move(x+65,y-45,{steps:4});
+      assert.equal(await page.locator('.drag-modeling-feedback').count(),0,'A click after exit must not start a new drawing');
+      await dragToggle.click();await dragToggle.click();
+      assert.equal(await dragToggle.getAttribute('aria-pressed'),'false','The toolbar must allow exit before a draft starts');
+      await dragToggle.click();
+      await page.locator('[aria-label="选择过滤器"]').getByRole('button',{name:'体',exact:true}).click();
+      assert.equal(await dragToggle.getAttribute('aria-pressed'),'false','Selecting a pick mode must exit drawing');
+      await dragToggle.click();
       await page.mouse.click(x,y);await page.mouse.move(x+65,y-45,{steps:4});
       await page.getByRole('button',{name:'取消绘制',exact:true}).click();
+      assert.equal(await dragToggle.getAttribute('aria-pressed'),'false');
       assert.equal(await page.locator('.drag-modeling-feedback').count(),0);
       assert.equal((await command('document.summary')).revision,before.revision,'Visible cancel must not create geometry');
+      await dragToggle.click();
       await page.mouse.click(x,y);await page.mouse.move(x+65,y-45,{steps:4});
       await page.getByRole('button',{name:'参数输入',exact:true}).click();
       await page.getByTestId('advanced-modeling-panel').waitFor();
@@ -946,6 +1031,9 @@ async function assertModelVisible() {
       assert.equal(request.parameters.height*2,Math.round(request.parameters.height*2));
       await page.waitForFunction(count=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===count+1,before.bodyCount);
       const saved=await command('document.summary');
+      const dragKind=page.getByLabel('拖拽建模类型',{exact:true});
+      await dragKind.waitFor({state:'detached'});
+      await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
       await page.mouse.click(x,y);await page.mouse.move(x+70,y-45,{steps:4});
       await page.getByLabel('构造平面吸附步长',{exact:true}).selectOption('0.1');
       assert.equal(await page.locator('.drag-modeling-feedback').count(),0,'Changing snap must cancel the old drawing');
@@ -977,6 +1065,7 @@ async function assertModelVisible() {
       const viewport=await page.getByTestId('cad-viewport').boundingBox(),x=viewport.x+viewport.width*.3,y=viewport.y+viewport.height*.55,before=await command('document.summary');
       await page.mouse.click(x,y);await page.mouse.move(x+70,y-40,{steps:4});await page.mouse.click(x+70,y-40);await page.mouse.move(x+70,y-100,{steps:4});await command('variable.set',{name:'duringDrawing',type:'dimensionless',expression:'1'});
       await page.mouse.click(x+70,y-100);await page.waitForFunction(()=>document.querySelector('.command-error')?.textContent.includes('工程已') || document.body.textContent.includes('草稿已保留'));
+      assert.equal(await page.getByRole('button',{name:'拖拽建模',exact:true}).getAttribute('aria-pressed'),'true','A failed commit must not exit drag mode');
       assert.equal((await command('document.summary')).bodyCount,before.bodyCount);assert.equal(await page.locator('.drag-dimension-readout').count(),0);await command('variable.delete',{}, {name:'duringDrawing'});await page.reload({waitUntil:'networkidle'});
     });
     await page.getByRole('button',{name:'参数建模',exact:true}).click();
@@ -1000,7 +1089,8 @@ async function assertModelVisible() {
       await assertModelVisible();
       await page.screenshot({path:path.join(screenshots,'command-journal.png'),fullPage:true});
       assert.equal((await command('document.view')).revision,before);
-      await journal.getByRole('button',{name:'清除已完成'}).click(); assert.equal(await journal.locator('details').count(),0);
+      await journal.getByRole('button',{name:'清除已完成'}).click(); await journal.getByText('暂无失败记录').waitFor();
+      assert.equal(await journal.locator('details').count(),0);
       assert.match(await page.locator('.ready-state').innerText(),/^就绪$/);
     });
     await check('WebGL context recovery rebuilds cached bodies without modifying the CAD project',async()=>{
@@ -1021,18 +1111,18 @@ async function assertModelVisible() {
       const download=page.waitForEvent('download');await page.locator('[data-command="file.save"]').click();const backup=await download;assert.equal(backup.suggestedFilename(),'前处理验证工程.cadproj');
       await page.locator('.workspace-identity small').filter({hasText:'备份包已生成'}).waitFor();
       await page.reload({waitUntil:'networkidle'});await page.waitForFunction(id=>document.querySelector('main.cad-shell').dataset.documentId===id,sourceId);await assertModelVisible();assert.equal((await command('document.view')).revision,before.revision);
-      await page.getByRole('tab',{name:'工程',exact:true}).click();await page.locator('[data-command="file.new"]').click();await page.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();
+      await page.getByRole('tab',{name:'工程',exact:true}).click();await newProject();await page.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();
       const emptyId=await page.locator('main.cad-shell').getAttribute('data-document-id');assert.notEqual(emptyId,sourceId);
       await page.reload({waitUntil:'networkidle'});await page.waitForFunction(id=>document.querySelector('main.cad-shell').dataset.documentId===id,emptyId);assert.equal((await command('document.view')).bodyCount,0);assert.equal((await command('document.view')).revision,0);
       await page.getByRole('button',{name:'拖拽建模',exact:true}).click();await page.getByLabel('拖拽建模类型',{exact:true}).selectOption('box');
       const emptyBounds=await page.getByTestId('cad-viewport').boundingBox();await page.mouse.click(emptyBounds.x+emptyBounds.width*.3,emptyBounds.y+emptyBounds.height*.35);await page.mouse.move(emptyBounds.x+emptyBounds.width*.55,emptyBounds.y+emptyBounds.height*.6,{steps:6});await page.locator('.drag-dimension-readout').waitFor();assert.equal((await command('document.view')).bodyCount,0);
-      await page.getByRole('button',{name:'工程名称与恢复'}).click();const recovered=page.getByTestId('workspace-manager');await recovered.getByLabel('查找工程').fill('前处理验证工程');await recovered.getByRole('button',{name:'恢复',exact:true}).click();
+      await page.getByRole('button',{name:'工程名称与恢复'}).click();const recovered=page.getByTestId('workspace-manager');await recovered.getByLabel('查找工程').fill('前处理验证工程');await switchWithoutSaving(() => recovered.getByRole('button',{name:'恢复',exact:true}).click());
       await page.waitForFunction(id=>document.querySelector('main.cad-shell').dataset.documentId===id,sourceId);await assertModelVisible();assert.equal((await command('document.view')).bodyCount,before.bodyCount);
       assert.equal(await page.locator('.drag-dimension-readout').count(),0,'Switching workspaces must cancel the old preview');
       await page.screenshot({path:path.join(screenshots,'workspace-recovered.png'),fullPage:true});
     });
     await check('ambiguous property references keep their values and require an explicit highlighted candidate',async()=>{
-      await page.getByRole('tab',{name:'工程',exact:true}).click();await page.locator('[data-command="file.new"]').click();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');
+      await page.getByRole('tab',{name:'工程',exact:true}).click();await newProject();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');
       const box=await command('primitive.box',{width:100,depth:100,height:20});let top;
       for(const selectionId of new Set(box.triangleFaceIds)){const face=await command('geometry.measure',{}, {bodyId:box.bodyId,selectionType:'face',selectionId});if(Math.abs(face.centroid[2]-20)<1e-6){top=selectionId;break;}}
       assert.ok(top);const type=await command('property.type.create',{key:'ReviewPort',name:'待复核端口',targetScope:'face',association:'required',fields:[{key:'frequency',label:'频率',type:'double'}]});
@@ -1065,7 +1155,7 @@ async function assertModelVisible() {
       await assertModelVisible();await page.screenshot({path:path.join(screenshots,'property-after-recompute.png'),fullPage:true});
     });
     await check('Sheet Body uses one mesh toggle, restores it after Body hide/show, and cannot locate stale surface results',async()=>{
-      await page.getByRole('tab',{name:'工程',exact:true}).click();await page.locator('[data-command="file.new"]').click();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');
+      await page.getByRole('tab',{name:'工程',exact:true}).click();await newProject();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');
       const solid=await command('primitive.box',{width:20,depth:20,height:20,x:-10,y:-10,z:-10}),sheet=await command('surface.rectangle',{width:40,height:40});
       await page.reload({waitUntil:'networkidle'});await assertModelVisible();await page.getByRole('tab',{name:'网格',exact:true}).click();await page.locator('[data-command="analysis.mesh"]').click();
       const mesh=page.getByTestId('mesh-workbench-panel');await mesh.getByRole('button',{name:'开始剖分（结果默认隐藏）',exact:true}).click();await mesh.locator('.mesh-job-card').waitFor({timeout:60000});
@@ -1102,7 +1192,7 @@ async function assertModelVisible() {
       await page.screenshot({path:path.join(screenshots,'repair-snapshot-meshed.png'),fullPage:true});await close();
     });
     await check('a blocked preparation exposes actionable diagnostics without claiming a mesh exists',async()=>{
-      await page.getByRole('tab',{name:'工程',exact:true}).click();await page.locator('[data-command="file.new"]').click();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');await command('surface.rectangle',{width:20,height:20});await page.reload({waitUntil:'networkidle'});
+      await page.getByRole('tab',{name:'工程',exact:true}).click();await newProject();await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();await command('document.summary');await command('surface.rectangle',{width:20,height:20});await page.reload({waitUntil:'networkidle'});
       const before=await command('document.summary');await page.getByRole('tab',{name:'网格',exact:true}).click();await page.locator('[data-command="analysis.mesh"]').click();const mesh=page.getByTestId('mesh-workbench-panel');await mesh.getByLabel('深入自交检查（预览时较慢）',{exact:true}).uncheck();await mesh.getByRole('button',{name:'诊断并预览修复',exact:true}).click();
       const report=mesh.getByRole('group',{name:'几何诊断与修复预览'});await report.getByRole('status').filter({hasText:'没有闭合实体'}).waitFor({timeout:60000});assert.equal(await report.getByRole('button',{name:'预览修复快照（只读）',exact:true}).count(),0);assert.equal(await report.getByRole('button',{name:'使用此快照剖分',exact:true}).isDisabled(),true);assert.equal(await mesh.locator('.mesh-job-card').count(),0);
       await report.getByRole('button',{name:'展开诊断明细',exact:true}).click();await report.getByText('开放边界',{exact:true}).first().waitFor();await report.getByRole('button',{name:'定位原几何',exact:true}).first().click();assert.match(await page.getByTestId('selection-readout').innerText(),/edge-/);assert.equal((await command('document.summary')).revision,before.revision);
@@ -1124,7 +1214,7 @@ async function assertModelVisible() {
     await check('large assembly edges remain visible and pickable with shading enabled', async () => {
       await page.setViewportSize({width:1440,height:960});
       await page.getByRole('tab',{name:'工程',exact:true}).click();
-      await page.locator('[data-command="file.new"]').click();
+      await newProject();
       await geometry.getByText('暂无几何，使用上方创建工具添加。',{exact:true}).waitFor();
       await command('document.summary');
       for (let i = 0; i < 9; i++) await command('primitive.box',{width:8,depth:8,height:8,x:12*(i%3),y:12*Math.floor(i/3)});
@@ -1143,6 +1233,120 @@ async function assertModelVisible() {
       const bounds=await viewport.boundingBox();
       await page.mouse.click(bounds.x+point.x,bounds.y+point.y);
       await page.getByTestId('selection-readout').getByText(`边拾取 · ${point.edgeId}`,{exact:true}).waitFor();
+    });
+    await check('geometry snap preserves rotated BRep endpoints and curve midpoints through preview and commit', async () => {
+      await page.getByRole('tab', {name:'工程',exact:true}).click();
+      await newProject();
+      await command('document.summary');
+      const coordinateSystemId = 'snap_yz';
+      await command('coordinate.set', {id: coordinateSystemId, name:'Snap YZ', origin:[11,20,30], xAxis:[0,1,0], yAxis:[0,0,1]});
+      const rectangle = await command('surface.rectangle', {width:20,height:16,x:-20.25,y:.375,coordinateSystemId});
+      const disk = await command('surface.disk', {radius:8.125,x:20.25,y:.375,coordinateSystemId});
+      const offPlane = await command('surface.rectangle', {width:10,height:8,x:10.125,y:18.375,z:2,coordinateSystemId});
+      const hidden = await command('surface.rectangle', {width:10,height:8,x:-10.125,y:18.375,coordinateSystemId});
+      await command('body.update', {visible:false}, {bodyId:hidden.bodyId});
+
+      const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-7, `Expected ${expected}, got ${actual}`);
+      const start = [11,-10.25,22.375];
+      assert.ok(rectangle.edges.some(edge => edge.snap.endpoints.some((point) => point.every((value,i) => Math.abs(value - start[i]) < 1e-7))));
+      const midpoint = disk.edges[0].snap.midpoint;
+      near(midpoint[0],11);
+      near(midpoint[1],32.125);
+      near(midpoint[2],30.375);
+      await page.reload({waitUntil:'networkidle'});
+      await assertModelVisible();
+      await page.getByLabel('构造坐标系',{exact:true}).selectOption(coordinateSystemId);
+      await page.getByRole('button',{name:'正视构造面',exact:true}).click();
+      await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
+      await page.getByLabel('拖拽建模类型',{exact:true}).selectOption('box');
+      const viewport = page.getByTestId('cad-viewport');
+      const bounds = await viewport.boundingBox();
+      const pose = await viewport.evaluate(node => {node.dispatchEvent(new Event('cad:verify-frame'));return JSON.parse(node.dataset.cameraPose);});
+      const THREE = require('three');
+      const camera = new THREE.PerspectiveCamera(38, bounds.width / bounds.height, .01, 10000);
+      camera.position.fromArray(pose);
+      camera.up.set(0,0,1);
+      camera.lookAt(new THREE.Vector3(...pose.slice(3,6)));
+      camera.zoom = pose[6];
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld();
+      const screen = (world) => {
+        const point = new THREE.Vector3(...world).project(camera);
+        assert.ok(Math.abs(point.x)<.98 && Math.abs(point.y)<.98, JSON.stringify({world,pose,point}));
+        return [bounds.x+(point.x+1)*bounds.width/2,bounds.y+(1-point.y)*bounds.height/2];
+      };
+      const marker = page.locator('.construction-snap-marker[data-point]');
+      const pointKind = async (world, kind) => {
+        await page.mouse.move(...screen(world));
+        await marker.waitFor();
+        assert.equal(await marker.getAttribute('data-kind'), kind);
+      };
+      await pointKind(offPlane.edges[0].snap.endpoints[0], 'grid');
+      await pointKind(hidden.edges[0].snap.endpoints[0], 'grid');
+      const snapToggle = page.getByRole('button',{name:'几何吸附',exact:true});
+      await snapToggle.click();
+      await pointKind(start, 'grid');
+      await snapToggle.click();
+      await pointKind(start, 'endpoint');
+      assert.equal(await marker.getAttribute('data-point'), '-30.25,-7.625');
+      const startScreen = screen(start), endScreen = screen(midpoint);
+      await page.mouse.click(...startScreen);
+      await pointKind(midpoint, 'midpoint');
+      assert.equal(await marker.getAttribute('data-point'), '12.125,0.375');
+      const preview = page.locator('.drag-dimension-readout');
+      await preview.waitFor();
+      assert.match(await preview.innerText(), /42\.375 × 8 ×/);
+      await page.mouse.click(...endScreen);
+      await page.mouse.move(endScreen[0],endScreen[1]-70,{steps:5});
+      assert.match(await preview.innerText(), /高度 · 42\.375 × 8 ×/);
+      const created = page.waitForResponse(response => response.url().endsWith('/commands') && response.request().postDataJSON()?.operation==='primitive.box');
+      await page.mouse.click(endScreen[0],endScreen[1]-70);
+      const response = await created;
+      const {parameters} = response.request().postDataJSON();
+      assert.equal(parameters.coordinateSystemId,coordinateSystemId);
+      near(parameters.x,-30.25); near(parameters.y,-7.625);
+      near(parameters.width,42.375); near(parameters.depth,8);
+      assert.equal(parameters.height,Math.round(parameters.height));
+      const result = await response.json();
+      assert.equal(result.ok,true,JSON.stringify(result));
+      const boundsBox = new THREE.Box3().setFromArray(result.positions);
+      boundsBox.min.toArray().forEach((value,i) => near(value,start[i]));
+      near(boundsBox.max.y,midpoint[1]); near(boundsBox.max.z,midpoint[2]);
+      await page.getByLabel('拖拽建模类型',{exact:true}).waitFor({state:'detached'});
+    });
+    await check('backup deletion requires confirmation of the filename and leaves current geometry intact', async () => {
+      await page.getByRole('tab',{name:'工程',exact:true}).click();
+      const id = await currentId();
+      const snapshot = await command('document.summary');
+      const requests = [];
+      const capture = request => { if (request.method() === 'DELETE' && request.url().includes('/project/backups/')) requests.push(request.url()); };
+      page.on('request',capture);
+      try {
+        await page.locator('[data-command="file.saveAs"]').click();
+        const saveAs = page.getByRole('dialog',{name:'另存为',exact:true});
+        await saveAs.getByLabel('工程名称').fill('可删除的回归备份');
+        const downloaded = page.waitForEvent('download');
+        await saveAs.getByRole('button',{name:'下载副本'}).click();
+        assert.equal((await downloaded).suggestedFilename(),'可删除的回归备份.cadproj');
+        await page.locator('[data-command="project.backups"]').click();
+        const backups = page.getByTestId('project-backup-manager');
+        const backup = backups.locator('[data-backup-id]').filter({hasText:'可删除的回归备份.cadproj'});
+        const deleteButton = backup.getByRole('button',{name:'删除备份文件',exact:true});
+        const dialog = page.getByRole('dialog',{name:'删除备份文件',exact:true});
+        await deleteButton.click();
+        await dialog.getByText('可删除的回归备份.cadproj',{exact:true}).waitFor();
+        assert.ok((await dialog.innerText()).includes('R'+snapshot.revision));
+        await page.keyboard.press('Escape');
+        await dialog.waitFor({state:'detached'});
+        assert.equal(requests.length,0);
+        assert.equal(await deleteButton.evaluate(button=>button===document.activeElement),true);
+        await deleteButton.click();
+        await dialog.getByRole('button',{name:'确认删除文件'}).click();
+        await backup.waitFor({state:'detached'});
+        assert.equal(requests.length,1);
+        assert.equal(await currentId(),id);
+        assert.equal((await command('document.summary')).stateToken,snapshot.stateToken);
+      } finally { page.off('request',capture); }
     });
     assert.deepEqual(errors, []);
     process.stdout.write(JSON.stringify({ passed: passed.length, screenshots, browserErrors: errors }, null, 2) + '\n');

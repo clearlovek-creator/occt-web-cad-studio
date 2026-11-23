@@ -22,28 +22,27 @@
 #include <XCAFDoc_ColorTool.hxx>
 #include <TDataStd_Name.hxx>
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
 #include <vector>
 #include <iomanip>
+#include <utility>
 
 namespace occweb
 {
-std::string CadDocument::ImportStep(const std::string& requestId, const std::string& path)
-{
-  CadDocument staged(myDocumentId);
-  const std::string response=staged.importStepStaged(requestId,path);
-  swapState(staged);
-  return response;
-}
-
 std::string CadDocument::importStepStaged(const std::string& requestId,const std::string& path)
 {
+  constexpr double millimetres = 0.001;
+  double lengthUnit = 0.0;
+  const bool hasLengthUnit = XCAFDoc_DocumentTool::GetLengthUnit(myDocument, lengthUnit);
+  if (hasLengthUnit && std::abs(lengthUnit - millimetres) > 1e-12)
+    throw CadError("STEP_APPEND_UNIT_MISMATCH", "STEP append requires a millimetre project. The current XBF declares a different length unit.");
   const std::filesystem::path sourcePath = std::filesystem::absolute(std::filesystem::u8path(path)).lexically_normal();
   const auto imported=ReadStepParts(sourcePath.u8string(),2,"",myDocument);
-  XCAFDoc_DocumentTool::SetLengthUnit(myDocument,0.001);
+  if (!hasLengthUnit) XCAFDoc_DocumentTool::SetLengthUnit(myDocument, millimetres);
 
   ++myRevision;
   FeatureNode feature;
@@ -78,14 +77,14 @@ std::string CadDocument::importStepStaged(const std::string& requestId,const std
     myActiveBodyId = body.Id;
     myBodies.emplace(body.Id, body);
   }
-  if (myBodies.empty()) throw CadError("STEP_EMPTY", "The STEP file contains no usable shapes.");
-  myFeatures.push_back(feature);
+  myFeatures.push_back(std::move(feature));
   persistMetadata();
   std::ostringstream report;report<<",\"stepImport\":{\"version\":1,\"decompositionVersion\":2,\"modelLengthUnit\":\"mm\",\"sourceLengthUnits\":[";
   for(std::size_t index=0;index<imported.LengthUnits.size();index++){if(index)report<<',';report<<'"'<<JsonEscape(imported.LengthUnits[index])<<'"';}
-  report<<"],\"rootCount\":"<<imported.RootCount<<",\"emptyRootCount\":"<<imported.EmptyRoots<<",\"bodyCount\":"<<myBodies.size()<<",\"solidCount\":"<<solidCount<<",\"sheetCount\":"<<sheetCount<<",\"wireCount\":"<<wireCount<<",\"otherCount\":"<<otherCount<<",\"invalidBodyCount\":"<<invalidCount<<",\"ambiguousSubshapeMetadata\":"<<imported.AmbiguousSubshapeMetadata<<",\"assemblyHierarchyRetained\":false,\"applicationRepairApplied\":false,\"translatorShapeProcessing\":\"occt-default\"}";
+  report<<"],\"rootCount\":"<<imported.RootCount<<",\"emptyRootCount\":"<<imported.EmptyRoots<<",\"bodyCount\":"<<imported.Parts.size()<<",\"solidCount\":"<<solidCount<<",\"sheetCount\":"<<sheetCount<<",\"wireCount\":"<<wireCount<<",\"otherCount\":"<<otherCount<<",\"invalidBodyCount\":"<<invalidCount<<",\"ambiguousSubshapeMetadata\":"<<imported.AmbiguousSubshapeMetadata<<",\"assemblyHierarchyRetained\":false,\"applicationRepairApplied\":false,\"translatorShapeProcessing\":\"occt-default\"}";
   if(invalidCount||imported.EmptyRoots||imported.AmbiguousSubshapeMetadata)report<<",\"warnings\":[\"STEP imported with diagnostic warnings; inspect geometry validity and metadata before modeling or meshing.\"]";
-  return responsePrefix(requestId) + ",\"activeBodyId\":\""+JsonEscape(myActiveBodyId)+"\",\"presentationMode\":\"lazy\""+report.str()+"}";
+  return responsePrefix(requestId) + ",\"activeBodyId\":\""+JsonEscape(myActiveBodyId)+"\",\"presentationMode\":\"lazy\""
+       + ",\"propertyRecords\":" + myProperties.ToJson() + report.str() + "}";
 }
 
 std::string CadDocument::ExportStep(const std::string& requestId, const std::string& path,

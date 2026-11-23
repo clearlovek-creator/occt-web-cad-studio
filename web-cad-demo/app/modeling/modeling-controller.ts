@@ -96,6 +96,7 @@ export class ModelingCommandError extends Error {
   readonly requestId?: string;
   readonly details?:Record<string,unknown>;
   readonly modelingTask?:ModelingTaskStatus;
+  readonly execution?: 'not-started';
 
   constructor(payload: ModelingCommandErrorPayload, status: number) {
     super(payload.error || "Geometry command failed.");
@@ -107,6 +108,7 @@ export class ModelingCommandError extends Error {
     this.requestId = payload.requestId;
     this.details=payload.details;
     this.modelingTask=payload.modelingTask;
+    this.execution=payload.execution;
   }
 }
 
@@ -117,9 +119,24 @@ type WorkspaceTransfer = {
 };
 export type CommandLogEntry = {
   requestId: string; documentId: string; operation: string; startedAt: number;
-  status: "running" | "success" | "error" | "cancelled"; durationMs?: number; revision?: number;
+  status: "running" | "success" | "error" | "cancelled" | "unknown"; durationMs?: number; revision?: number;
+  taskId?: string;
   code?: string; message?: string; warningCount?: number; warnings?: string[];
 };
+
+function failedCommandLog(error: ModelingCommandError, write: boolean): Partial<CommandLogEntry> {
+  const task = error.modelingTask;
+  const uncertain = task?.phase === 'unknown' || !task && write && error.execution !== 'not-started' && [
+    'NETWORK_ERROR', 'INVALID_RESPONSE', 'FRONTEND_GATEWAY_UNAVAILABLE',
+    'STEP_IMPORT_RESULT_UNKNOWN', 'MODELING_TASK_RESULT_UNKNOWN', 'MODELING_TASK_RESULT_UNCONFIRMED', 'MODELING_TASK_PROTOCOL', 'PROJECT_ROLLBACK_FAILED',
+  ].includes(error.code);
+  return {
+    status: task?.phase === 'cancelled' || error.code === 'PROJECT_BACKUP_DOWNLOAD_CANCELLED' ? 'cancelled' : uncertain ? 'unknown' : 'error',
+    taskId: task?.taskId,
+    code: error.code,
+    message: error.message,
+  };
+}
 
 export type ModelingControllerOptions = {
   apiRoot?: string;
@@ -829,6 +846,7 @@ export class ModelingController<TModel = unknown> {
     input: ModelingCommandInput,
   ): Promise<TResponse> {
     const request = normalizeCommandRequest(input, this.state.documentId);
+    const write = !this.isReadOnlyOperation(request.operation) && !request.options?.preview;
     if(!this.isReadOnlyOperation(request.operation))this.assertNoWorkspaceTransfer();
     const requestId = request.requestId!;
     this.pendingCommands.set(requestId, request.operation);
@@ -861,7 +879,7 @@ export class ModelingController<TModel = unknown> {
       const reason=caught instanceof ModelingTaskClientError?new ModelingCommandError(caught.payload,caught.status):caught;
       if (reason instanceof ModelingCommandError) {
         const cancelled=reason.modelingTask?.phase==='cancelled';
-        this.finishCommandLog(requestId, { status:cancelled?'cancelled':"error", code:reason.code, message:reason.message });
+        this.finishCommandLog(requestId, failedCommandLog(reason, write));
         if (request.documentId === this.state.documentId) this.update({error:cancelled?null:{ok:false,code:reason.code,error:reason.message,requestId,recoverable:reason.recoverable,fieldPath:reason.fieldPath}});
         throw reason;
       }
@@ -873,7 +891,7 @@ export class ModelingController<TModel = unknown> {
         error: reason instanceof Error ? reason.message : "Geometry command failed.",
         recoverable: true,
       };
-      this.finishCommandLog(requestId, {status:"error",code:errorPayload.code,message:errorPayload.error});
+      this.finishCommandLog(requestId, {status:write ? 'unknown' : 'error',code:errorPayload.code,message:errorPayload.error});
       if (request.documentId === this.state.documentId) this.update({ error: errorPayload });
       throw new ModelingCommandError(errorPayload, 0);
     } finally {
@@ -908,14 +926,16 @@ export class ModelingController<TModel = unknown> {
     }catch(caught){
       const reason=caught instanceof ModelingTaskClientError?new ModelingCommandError(caught.payload,caught.status):caught;
       const error=reason instanceof ModelingCommandError?reason:new ModelingCommandError({ok:false,code:"NETWORK_ERROR",error:reason instanceof Error?reason.message:"工程事务请求失败。"},0),cancelled=error.modelingTask?.phase==='cancelled';
-      this.finishCommandLog(requestId,{status:cancelled?'cancelled':"error",code:error.code,message:error.message});
+      this.finishCommandLog(requestId,failedCommandLog(error,true));
       if(documentId===this.state.documentId)this.update({error:cancelled?null:{ok:false,code:error.code,error:error.message,requestId}});
       throw error;
     }finally{this.pendingCommands.delete(requestId);this.update({busy:this.pendingCommands.size>0||this.hasPendingMutation(),pendingOperation:[...this.pendingCommands.values()].at(-1)||null});}
   }
 
-  clearCommandLog(documentId?: string) {
-    const keep = (entry: CommandLogEntry) => entry.status === "running" || (documentId !== undefined && entry.documentId !== documentId);
+  clearCommandLog(documentId?: string, confirmed: Pick<CommandLogEntry, 'operation' | 'requestId'>[] = []) {
+    const keep = (entry: CommandLogEntry) => (documentId !== undefined && entry.documentId !== documentId) ||
+      (entry.status === 'running' || entry.status === 'unknown') &&
+      !confirmed.some(item => item.operation === entry.operation && item.requestId === entry.requestId);
     const activeErrorRequest = this.state.error?.requestId;
     const clearsActiveError = activeErrorRequest && this.state.commandLog.some(entry => entry.requestId === activeErrorRequest && !keep(entry));
     this.update({ commandLog: this.state.commandLog.filter(keep), ...(clearsActiveError ? { error: null } : {}) });
@@ -986,7 +1006,8 @@ export class ModelingController<TModel = unknown> {
   private workspaceTransferFailure(transfer:WorkspaceTransfer,reason:unknown){
     const error=reason instanceof ModelingCommandError?reason:reason instanceof ModelingTaskClientError?new ModelingCommandError(reason.payload,reason.status):reason instanceof ProjectBackupReadError?new ModelingCommandError({ok:false,code:reason.code,error:reason.message,documentId:transfer.sourceDocumentId,requestId:transfer.requestId},reason.code==='PROJECT_BACKUP_DOWNLOAD_CANCELLED'?409:502):new ModelingCommandError({ok:false,requestId:transfer.requestId,documentId:transfer.sourceDocumentId,code:'NETWORK_ERROR',error:'工程文件操作结果尚未确认，请通过原任务或恢复工程列表核对；不会自动重传或重复执行。',recoverable:true,details:{targetDocumentId:transfer.targetDocumentId}},0);
     const cancelled=error.modelingTask?.phase==='cancelled'||error.code==='PROJECT_BACKUP_DOWNLOAD_CANCELLED';
-    this.finishCommandLog(transfer.requestId,{status:cancelled?'cancelled':error.code==='WORKSPACE_TRANSFER_SUPERSEDED'?'success':'error',code:error.code,message:error.message,warningCount:error.code==='WORKSPACE_TRANSFER_SUPERSEDED'?1:0});
+    const trackedWrite = ['project.create', 'project.open', 'project.save'].includes(transfer.operation);
+    this.finishCommandLog(transfer.requestId,error.code==='WORKSPACE_TRANSFER_SUPERSEDED' ? {status:'success',code:error.code,message:error.message,warningCount:1} : failedCommandLog(error,trackedWrite));
     if(this.ownsWorkspaceTransfer(transfer))this.update({error:cancelled?null:{ok:false,requestId:transfer.requestId,documentId:transfer.sourceDocumentId,code:error.code,error:error.message,recoverable:error.recoverable,details:error.details}});return error;
   }
   private async readWorkspaceResponse<TResponse extends ModelingCommandResponse>(response:Response,transfer:WorkspaceTransfer):Promise<TResponse>{
@@ -1122,7 +1143,7 @@ export class ModelingController<TModel = unknown> {
       const reason=caught instanceof ModelingTaskClientError?new ModelingCommandError(caught.payload,caught.status):caught;
       const error=reason instanceof ModelingCommandError?reason:new ModelingCommandError({ok:false,requestId,documentId,code:'STEP_IMPORT_RESULT_UNKNOWN',error:'连接中断，导入结果尚未确认；不要重复上传，请查询导入记录并核对工程。',recoverable:false},0);
       const cancelled=error.modelingTask?.phase==='cancelled';
-      this.finishCommandLog(requestId,{status:cancelled?'cancelled':'error',code:error.code,message:error.message});
+      this.finishCommandLog(requestId,failedCommandLog(error,true));
       if(documentId===this.state.documentId){const uncertain=error.modelingTask?.phase==='unknown'||['STEP_IMPORT_RESULT_UNKNOWN','FRONTEND_GATEWAY_UNAVAILABLE','PROJECT_ROLLBACK_FAILED','PROJECT_RECOVERY_REQUIRED','WORKER_TIMEOUT','SERVICE_STOPPING'].includes(error.code);const previous=this.state.stepImportStatus?.requestId===requestId?this.state.stepImportStatus:initial;this.update({error:cancelled?null:{ok:false,documentId,requestId,code:error.code,error:error.message,recoverable:error.recoverable},stepImportStatus:previous.phase==='complete'?previous:receivedStatus&&receivedStatus.phase!=='complete'?receivedStatus:{...previous,phase:uncertain?'unknown':'failed',sequence:0,updatedAt:new Date().toISOString(),code:error.code,error:error.message},...(previous.phase==='complete'?{stepImportNotice:'导入响应未完整接收，但后台记录显示已完成；请核对当前工程。'}:{})});}
       throw error;
     }finally{this.pendingCommands.delete(requestId);this.update({busy:this.pendingCommands.size>0||this.hasPendingMutation(),pendingOperation:[...this.pendingCommands.values()].at(-1)||null});}
@@ -1203,11 +1224,12 @@ export class ModelingController<TModel = unknown> {
       throw new ModelingCommandError(errorPayload, 0);
     }
   }
-  async saveProject(): Promise<Blob> {
+  async saveProject(copyName?:string): Promise<Blob> {
+    if(copyName!==undefined&&!this.taskClient)throw new ModelingCommandError({ok:false,code:'PROJECT_SAVE_TASK_REQUIRED',error:'当前服务未启用工程副本保存。'},409);
     const transfer=this.beginWorkspaceTransfer('project.save',this.state.documentId);
     if(this.taskClient){
       try{
-        const input:ProjectSaveInput={protocolVersion:1,operation:'project.save',documentId:transfer.sourceDocumentId,requestId:transfer.requestId,...(transfer.revision===null?{}:{baseRevision:transfer.revision}),...(transfer.stateToken?{baseStateToken:transfer.stateToken}:{}),...(transfer.stateSequence===null?{}:{baseStateSequence:transfer.stateSequence})};
+        const input:ProjectSaveInput={protocolVersion:1,operation:'project.save',documentId:transfer.sourceDocumentId,requestId:transfer.requestId,...(transfer.revision===null?{}:{baseRevision:transfer.revision}),...(transfer.stateToken?{baseStateToken:transfer.stateToken}:{}),...(transfer.stateSequence===null?{}:{baseStateSequence:transfer.stateSequence}),...(copyName===undefined?{}:{copyName})};
         const packet=await this.taskClient.run(input,async(headers,command)=>{const response=await this.fetchImpl(`${this.apiRoot}/documents/${encodeURIComponent(transfer.sourceDocumentId)}/project/save`,{method:'POST',headers:{'Content-Type':'application/json','X-Request-Id':transfer.requestId,...headers},body:JSON.stringify({command})});let payload;try{payload=await response.json();}catch{throw new Error('保存回复不是有效 JSON，请检查原任务；不会重新生成。');}return {ok:response.ok,status:response.status,payload};});
         if(!packet.ok||!packet.payload.ok)throw new ModelingCommandError(packet.payload as ModelingCommandErrorPayload,packet.status);
         if(!this.ownsWorkspaceTransfer(transfer))throw new ModelingCommandError({ok:false,code:'WORKSPACE_TRANSFER_SUPERSEDED',error:'备份已生成，但当前工程状态已变化；未启动下载。请从原保存任务下载，不要重新生成。'},409);

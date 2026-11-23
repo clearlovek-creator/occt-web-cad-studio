@@ -1,4 +1,4 @@
-export type ProjectSaveInput={protocolVersion:1;operation:'project.save';documentId:string;requestId:string;baseRevision?:number;baseStateToken?:string;baseStateSequence?:number};
+export type ProjectSaveInput={protocolVersion:1;operation:'project.save';documentId:string;requestId:string;baseRevision?:number;baseStateToken?:string;baseStateSequence?:number;copyName?:string};
 export function normalizeProjectSaveInput(value:unknown):ProjectSaveInput;
 export function projectSaveCanonical(value:unknown):string;
 export type ProjectSaveTask=ProjectSaveInput&{version:1;taskId:string;canGenerate:boolean};

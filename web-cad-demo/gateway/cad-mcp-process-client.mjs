@@ -11,11 +11,11 @@ const unknown=code=>new McpProcessError(code,'CAD 工具已发送但没有取得
 
 /** One bounded, observed subprocess. Cancelling a sent atomic CAD call is not rollback. */
 export class CadMcpProcessClient{
-  constructor({serverPath,apiRoot,documentId,cwd=process.cwd(),spawnImpl=spawn,limits={},onDiagnostic=()=>{}}){
+  constructor({serverPath,apiRoot,documentId,piSessionId,piToolToken,cwd=process.cwd(),spawnImpl=spawn,limits={},onDiagnostic=()=>{}}){
     if(!serverPath)throw new McpProcessError('MCP_PATH_REQUIRED','CAD MCP 程序路径未配置。');
     this.limits={...MCP_PROCESS_LIMITS,...limits};for(const value of Object.values(this.limits))if(!Number.isSafeInteger(value)||value<1)throw new McpProcessError('MCP_INVALID_LIMIT','MCP 预算必须是正整数。');
     this.queue=[];this.queueBytes=0;this.active=null;this.sequence=0;this.state='open';this.reconcileRequired=false;this.stderrBytes=0;this.frames=new BoundedJsonLines(this.limits.responseBytes);
-    this.child=spawnImpl(process.execPath,[...backendChildArgs(),serverPath],{cwd,windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...backendChildEnvironment(),CAD_MCP_SERVER_PATH:serverPath,CAD_GEOMETRY_API_URL:apiRoot||'http://127.0.0.1:8788/api',CAD_DOCUMENT_ID:documentId||'default',CAD_AGENT_MODE:'edit'}});
+    this.child=spawnImpl(process.execPath,[...backendChildArgs(),serverPath],{cwd,windowsHide:true,stdio:['pipe','pipe','pipe'],env:{...backendChildEnvironment(),CAD_MCP_SERVER_PATH:serverPath,CAD_GEOMETRY_API_URL:apiRoot||'http://127.0.0.1:8788/api',CAD_DOCUMENT_ID:documentId||'default',CAD_AGENT_MODE:'edit',...(piSessionId&&piToolToken?{CAD_PI_SESSION_ID:piSessionId,CAD_PI_TOOL_TOKEN:piToolToken}:{})}});
     this.closed=new Promise(resolve=>this.child.once('close',()=>{this.finishExit();resolve();}));
     this.exited=childExit(this.child);this.exited.then(()=>{if(this.state==='open'){this.state='closing';this.rejectQueued('MCP_PROCESS_EXIT');}});
     this.child.stdout.on('data',chunk=>this.receive(Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk)));

@@ -129,6 +129,7 @@ export class PiRpcSession extends EventEmitter {
       this.assertReusable();
       this.frames.clear();this.stderrBytes=0;
       this.streamId = crypto.randomUUID();this.sequence=0;this.eventHistory=[];this.eventHistoryBytes=0;
+      this.cadToolToken = crypto.randomBytes(32).toString('hex');
       const args = [...backendChildArgs(this.env),this.cliPath, ...this.cliArgs, "--mode", "rpc", "--session-dir", this.sessionRoot, "--extension", this.extensionPath, "--no-builtin-tools"];
       if(resume){let file;try{file=await ownedPiResumeFile(this.sessionRoot);}catch(error){throw new PiSessionError('PI_SESSION_HISTORY_UNAVAILABLE',error instanceof Error?error.message:'原生 Pi 历史尚未核对，未启动空会话。');}if(file)args.push('--session',file);}
       this.assertReusable();
@@ -138,7 +139,7 @@ export class PiRpcSession extends EventEmitter {
         cwd: this.cwd,
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...runtimeEnvironment,...backendChildEnvironment(this.env,sdkRoot?'pi-bundled':'pi-external'),...(sdkRoot?{CAD_PI_SDK_ROOT:sdkRoot,PI_PACKAGE_DIR:path.join(sdkRoot,'packages/coding-agent'),JITI_FS_CACHE:'false',TSX_TSCONFIG_PATH:path.join(sdkRoot,'tsconfig.json'),TSX_CACHE_DIR:path.join(this.agentConfigDir,'runtime-cache/tsx'),PI_SKIP_VERSION_CHECK:'1'}:{}), PI_CODING_AGENT_DIR: this.agentConfigDir, CAD_DOCUMENT_ID: this.documentId, CAD_AGENT_MODE: this.mode, CAD_MCP_SERVER_PATH: path.resolve(path.dirname(this.extensionPath), "cad-mcp-server.mjs") },
+        env: { ...runtimeEnvironment,...backendChildEnvironment(this.env,sdkRoot?'pi-bundled':'pi-external'),...(sdkRoot?{CAD_PI_SDK_ROOT:sdkRoot,PI_PACKAGE_DIR:path.join(sdkRoot,'packages/coding-agent'),JITI_FS_CACHE:'false',TSX_TSCONFIG_PATH:path.join(sdkRoot,'tsconfig.json'),TSX_CACHE_DIR:path.join(this.agentConfigDir,'runtime-cache/tsx'),PI_SKIP_VERSION_CHECK:'1'}:{}), PI_CODING_AGENT_DIR: this.agentConfigDir, CAD_DOCUMENT_ID: this.documentId, CAD_AGENT_MODE: this.mode, CAD_MCP_SERVER_PATH: path.resolve(path.dirname(this.extensionPath), "cad-mcp-server.mjs"), CAD_PI_SESSION_ID:this.sessionId, CAD_PI_TOOL_TOKEN:this.cadToolToken },
       });
       this.child = child;
       this.closed = false;

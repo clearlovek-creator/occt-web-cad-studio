@@ -32,7 +32,7 @@ async function emptyBody(request) {
     if (!body || Array.isArray(body) || typeof body !== 'object' || Object.keys(body).length)
         throw new ModelingTaskError('MODELING_TASK_ARGUMENTS', '任务控制请求不能携带命令参数。', 400);
 }
-export async function handleModelingTaskRoute({ request, response, url, service, readJson, prepareCommand, sendJson, webOrigin, port }) {
+export async function handleModelingTaskRoute({ request, response, url, service, readJson, prepareCommand, beforeReserve, sendJson, webOrigin, port }) {
     const match = url.pathname.match(/^\/api\/documents\/([A-Za-z0-9_-]{1,64})\/modeling-tasks(?:\/([a-f0-9-]{36})(?:\/(cancel|result|abandon))?)?$/);
     if (!match)
         return false;
@@ -44,10 +44,11 @@ export async function handleModelingTaskRoute({ request, response, url, service,
         const body = await readJson(request);
         if (!body || Array.isArray(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'command'))
             throw new ModelingTaskError('MODELING_TASK_ARGUMENTS', '请提供唯一的 command 对象以登记任务。', 400);
-        const meta = prepareCommand(body.command);
+        const meta = prepareCommand(body.command, documentId);
         if (meta.documentId !== documentId)
             throw new ModelingTaskError('MODELING_TASK_CONFLICT', '任务工程与命令工程不一致。');
-        sendJson(response, 201, { ok: true, protocolVersion: 1, documentId, modelingTask: service.reserve(meta) });
+        const bindings = beforeReserve?.(request, response, body.command, meta);
+        sendJson(response, 201, { ok: true, protocolVersion: 1, documentId, modelingTask: service.reserve(meta, bindings && await bindings) });
         return true;
     }
     if (request.method === 'GET') {

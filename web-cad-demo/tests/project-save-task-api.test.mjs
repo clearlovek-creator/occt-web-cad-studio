@@ -30,6 +30,37 @@ test('a generated package has an exact durable receipt, contains both native and
   const opened=await fetch(f.api+'/documents/backup-check/project/open',{method:'POST',headers:{'Content-Type':'application/vnd.webcad.project'},body:bytes});assert.equal(opened.status,200);const nativeRecords=(await f.cad('property.list',{}, {},'backup-check')).propertyRecords.filter(record=>record.state==='active'&&record.values.saveMarker);assert.equal(nativeRecords.length,1);assert.equal(nativeRecords[0].values.saveMarker.value,82);assert.equal((await f.cad('property.instance.list',{}, {},'backup-check')).instances[0].value.marker,82);await same(f,before);
  }finally{if(f){assert.equal(await f.stop(),0);clean(data);}}});
 
+test('a named copy preserves the source workspace identity and unsaved changes', async () => {
+ const data = scratch();
+ let f;
+ try {
+  f = await gatedGeometryGateway(data);
+  const before = await seed(f);
+  await f.post('/projects/default', {name: '源工程'});
+  const source = (await f.get('/projects/default')).project;
+  assert.equal(source.hasChangesSinceExport, true);
+  const command = {...input(before), copyName: '独立副本'};
+  const task = await reserve(f, command);
+  assert.equal((await f.post('/documents/default/project/save/tasks', {command: {...command, copyName: '其他名称'}})).status, 409);
+  const saved = await generate(f, command, task);
+  assert.equal(saved.status, 200, JSON.stringify(saved));
+  const bytes = await download(f, saved.value);
+  assert.equal(decodeProjectPackage(bytes).metadata.document.name, '独立副本');
+  const reopened = await fetch(f.api + '/documents/copy-check/project/open', {
+   method: 'POST', headers: {'Content-Type': 'application/vnd.webcad.project'}, body: bytes,
+  });
+  assert.equal(reopened.status, 200, await reopened.clone().text());
+  assert.equal((await f.get('/projects/copy-check')).project.name, '独立副本');
+  const after = (await f.get('/projects/default')).project;
+  for (const key of ['documentId', 'name', 'token', 'hasChangesSinceExport', 'lastGeneratedToken', 'lastGeneratedAt', 'updatedAt']) {
+   assert.equal(after[key], source[key], key);
+  }
+  await same(f, before);
+ } finally {
+  if (f) { assert.equal(await f.stop(), 0); clean(data); }
+ }
+});
+
 test('later source edits and a gateway restart cannot change or regenerate the original backup bytes or receipt',async()=>{
  const data=scratch();let f;try{f=await gatedGeometryGateway(data);const before=await seed(f),command=input(before),task=await reserve(f,command),saved=await generate(f,command,task),bytes=await download(f,saved.value);await f.cad('primitive.sphere',{radius:4});const later=await state(f);assert.equal(later.model.bodyCount,2);assert.equal((await f.get('/projects/default')).project.hasChangesSinceExport,true);await f.stop();f=null;f=await gatedGeometryGateway(data);const receipt=(await f.get('/documents/default/modeling-tasks/'+task.taskId+'/result')).result;assert.deepEqual(await download(f,receipt),bytes);assert.equal(receipt.revision,before.model.revision);assert.equal((await generate(f,command,task)).value.code,'MODELING_TASK_ALREADY_SUBMITTED');await same(f,later);
  }finally{if(f){assert.equal(await f.stop(),0);clean(data);}}});

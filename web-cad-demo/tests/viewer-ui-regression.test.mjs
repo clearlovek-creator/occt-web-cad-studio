@@ -212,9 +212,10 @@ test("Boolean feature editor restores operation, roles and immutable output opti
   assert.match(source, /disabled checked=\{selected\.stringParameters\.keepTool/);
 });
 test("Feature lifecycle actions are exposed with safe type restrictions and confirmation", async () => {
-  const [source, css] = await Promise.all([
+  const [source, css, demo] = await Promise.all([
     readFile(new URL("../app/FeatureHistoryControls.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/CadDemo.tsx", import.meta.url), "utf8"),
   ]);
   assert.match(source, /operation: "feature\." \+ action/);
   assert.match(source, /"suppress" \| "restore" \| "delete"/);
@@ -226,7 +227,9 @@ test("Feature lifecycle actions are exposed with safe type restrictions and conf
   assert.match(source, /selected\.type === "detail\.thicken"/);
   assert.match(source, /selected\.type === "detail\.offset"/);
   assert.match(source, /selected\.type\.startsWith\("boolean\."\)/);
-  assert.match(source, /确认删除/);
+  assert.match(source, /onConfirmDelete\(selected\.id, bodyId/);
+  assert.match(demo, /onConfirmDelete=\{confirmFeatureDeletion\}/);
+  assert.match(demo, /确认删除/);
   for(const kind of ['sweep','pipe','loft'])assert.ok(source.includes(`selected.type === "detail.${kind}"`));
   assert.match(source, /此类特征暂不支持独立生命周期操作/);
   assert.match(css, /\.feature-lifecycle-actions/);

@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { projectStateToken, mutationFingerprint } from "./project-state.mjs";
 import { selectionStateProblem, selectionBindingPaths, SELECTION_STATE_POLICY } from "./selection-precondition.mjs";
 import {nativeGeometryFeatures,capabilitySnapshot,validateCapabilityPrecondition,assertCapabilityPrecondition,assertImportedNamingUpgrade,WorkerCapabilityError} from './worker-capabilities.mjs';
@@ -49,6 +50,8 @@ import {DocumentActionQueue,DocumentActionError,documentActionLimits} from './do
 import {PendingProjectInputs,PendingProjectInputError} from './pending-project-inputs.mjs';
 import {gatewayErrorStatus} from './gateway-error-status.mjs';
 import {ModelingTaskService,ModelingTaskError} from './modeling-task-service.mjs';
+import {CommandJournal} from './command-journal.mjs';
+import {PiWriteApprovals, requiresPiWriteApproval, summarizePiWrite} from './pi-write-approval.mjs';
 import {handleModelingTaskRoute,authorizeModelingTaskRequest} from './modeling-task-routes.mjs';
 import {ShutdownControl} from './shutdown-control.mjs';
 import { corsHeaders, resolveCorsOrigin } from "./cors.mjs";
@@ -172,6 +175,11 @@ const piRuntime = new PiRpcRuntime({
   // external address or the standalone MCP server's default development port.
   env: {...process.env,CAD_GEOMETRY_API_URL:`http://127.0.0.1:${port}/api`},
 });
+const isLivePi = session => Boolean(session && piRuntime.get(session.sessionId) === session && session.child && !session.closed && !session.disposed);
+const piWriteApprovals = new PiWriteApprovals({
+  currentState: id => projectStateToken(id,historyFor(id)),
+  isLive: isLivePi,
+});
 function preparePiSessionConfig(sessionId,projectId) {
   const directory = path.join(dataDir, "pi-agent-config", normalizePiSessionId(sessionId));
   const { models, environment } = buildPiProviderConfig(providerStore.read());
@@ -186,6 +194,7 @@ function preparePiSessionConfig(sessionId,projectId) {
     "Before modeling, call query_model to inspect the current document and its spatial summary.",
     "Discuss and clarify requirements when needed. When the user asks for changes, use the smallest appropriate CAD MCP command, preserve expression strings, and query the model after changes. There is no Plan/Edit mode switch.",
     "Report concrete dimensions, Body IDs, and revision changes from tool results. Never claim a change succeeded unless a tool confirms it.",
+    "Deletion, consuming Boolean tools and batch_modify wait for a workbench approval card. Use batch_modify for a request to edit multiple existing Bodies together. A chat message is not a substitute for the card. If approval is cancelled or expires, stop that operation. After a stale approval read the latest project and reselect before proposing it again.",
   ].join("\n"), { mode: 0o600 });
   // A sealed SDK is code, not the user's Pi project. Local settings/packages
   // belong to this CAD project's persistent workspace, never the release tree.
@@ -273,7 +282,32 @@ const projectBackupCatalog=new ProjectBackupCatalog(projectBackups,{resolveOwner
   if(record?.operation!=='project.save'||!record.projectSaveInput)return null;
   return modelingTasks.validateProjectSaveBinding(record,record.projectSaveInput).documentId;
 }});
-const modelingTasks=new ModelingTaskService(dataDir,{ownerInstanceId:dataWriter.instanceId,onTerminal:record=>stepImportTasks?.settle(record),resolveOutcome:record=>{
+const commandJournal = new CommandJournal(dataDir, {
+  taskStatus: (id, taskId) => {
+    const record = modelingTasks.records.get(taskId);
+    const source = record?.projectCreateInput?.sourceDocumentId ?? record?.projectOpenInput?.sourceDocumentId;
+    return record && (record.documentId === id || source === id) ? modelingTasks.get(record.documentId, taskId) : null;
+  },
+  resolveOutcome: entry => {
+    const id = entry.documentId;
+    if (projectTransactions.active.has(id) || fs.existsSync(projectTransactions.journalPath(id)) || projectFiles.hasUnconfirmed(id)) return null;
+    const history = historyStore.get(id);
+    if (entry.receiptKey) {
+      const receipt = history.idempotency.find(item => item.key === entry.receiptKey && item.fingerprint === entry.fingerprint);
+      if (!receipt) return null;
+      const outcome = historyStore.readIdempotency(id, receipt);
+      return {ok: outcome?.ok, revision: outcome?.revision, updatedAt: Date.parse(receipt.recordedAt)};
+    }
+    const event = history.events.find(item => (!entry.eventId || item.eventId === entry.eventId) && item.requestId === entry.requestId && item.operation === entry.operation
+      && item.state === 'committed' && Date.parse(item.timestamp) >= entry.startedAt);
+    return event ? {ok: true, revision: event.afterRevision, updatedAt: Date.parse(event.timestamp)} : null;
+  },
+  onWarning: message => process.stderr.write(message + '\n'),
+});
+const modelingTasks=new ModelingTaskService(dataDir,{ownerInstanceId:dataWriter.instanceId,onReserved:record=>commandJournal.observeTask(record),onTerminal:record=>{
+  commandJournal.observeTask(record);
+  stepImportTasks?.settle(record);
+},resolveOutcome:record=>{
   if(record.operation==='project.save')return projectSaveTasks?.outcome(record)||null;
   if(projectTransactions.active.has(record.documentId)||fs.existsSync(projectTransactions.journalPath(record.documentId))||projectFiles.hasUnconfirmed(record.documentId))return null;
   const entry=historyStore.get(record.documentId).idempotency.find(item=>item.key===idempotencyKey(record.documentId,record.operation,record.requestKey));
@@ -325,11 +359,12 @@ projectSaveTasks=new ProjectSaveTasks({tasks:modelingTasks,backups:projectBackup
     checkStatePrecondition(id,input);const summary=withHistoryState(projectFiles.check(await command('document.summary',{documentId:id})),id);
     if(input.baseRevision!==undefined&&summary.revision!==input.baseRevision||input.baseStateSequence!==undefined&&summary.stateSequence!==input.baseStateSequence)throw new ModelingTaskError('PROJECT_STATE_CONFLICT','保存基线已变化，未生成其他版本的备份。');
     before={revision:summary.revision,stateToken:summary.stateToken,stateSequence:summary.stateSequence,workspaceToken:workspaces.token(id)};lease=projectBackups.reserve(task.taskId);const generation=documentLoader.generation;
-    modelingTasks.enterExecuting();const bytes=await projectFiles.save(id,{name:project.name,signal:task.controller.signal});await new Promise(resolve=>setImmediate(resolve));
+    const name=input.copyName??project.name;
+    modelingTasks.enterExecuting();const bytes=await projectFiles.save(id,{name,signal:task.controller.signal});await new Promise(resolve=>setImmediate(resolve));
     if(task.controller.signal.aborted)throw new ModelingTaskError('WORKER_CANCELLED','备份生成已请求取消。');
     if(!stable()||documentLoader.generation!==generation)throw new ModelingTaskError('PROJECT_SAVE_STATE_CHANGED','生成备份期间工程或内核代际已变化，未发布文件。');
-    modelingTasks.beginCommit();const result=await projectBackups.publish(lease,input,bytes,before,{name:project.name});let notice;
-    try{workspaces.markGenerated(id,before.workspaceToken);}catch{notice='备份已封存，但工程备份状态尚未更新；原文件仍可下载。';}
+    modelingTasks.beginCommit();const result=await projectBackups.publish(lease,input,bytes,before,{name});let notice;
+    if(input.copyName===undefined){try{workspaces.markGenerated(id,before.workspaceToken);}catch{notice='备份已封存，但工程备份状态尚未更新；原文件仍可下载。';}}
     return {result,notice};
   }catch(error){
     if(task.mode==='preparing')try{Object.defineProperty(error,'projectSaveNotStarted',{value:{documentId:id,confirmed:true}});}catch{/* Do not invent proof for immutable errors. */}
@@ -1171,24 +1206,93 @@ function isProjectDataOperation(operation){return isPropertySchemaOperation(oper
 function executeProjectDataOperation(operation,fields){return MESH_STRATEGY_OPERATIONS.has(operation)?executeMeshStrategyOperation(operation,fields):executePropertySchemaOperation(operation,fields);}
 function commandRequestFields(input,id){
   const clientRequestId=input.options?.idempotencyKey||input.idempotencyKey||input.requestId||'';
-  return {documentId:id,requestId:String(input.requestId||clientRequestId||`gateway-request-${requestSequence++}`),
+  return {documentId:id,requestId:String(input.requestId||clientRequestId||randomUUID()),
     ...(input.baseRevision===undefined?{}:{baseRevision:input.baseRevision}),...(input.baseStateToken===undefined?{}:{baseStateToken:input.baseStateToken}),
     ...(input.workerCapabilityPrecondition===undefined?{}:{workerCapabilityPrecondition:input.workerCapabilityPrecondition}),...(clientRequestId?{clientRequestId:String(clientRequestId)}:{}),
     ...(input.options?.agentPlanId?{agentPlanId:String(input.options.agentPlanId)}:{}),...(input.options?.conversationId?{conversationId:String(input.options.conversationId)}:{}),inputs:input.inputs||{},parameters:input.parameters||{}};
 }
-function prepareTaskCommand(input){
+function noteRejectedWrite(input, operation, error, routeDocument = input?.documentId || 'default') {
+  if (!input || (input.documentId || 'default') !== routeDocument || !/^[A-Za-z0-9_-]{1,64}$/.test(routeDocument)
+      || !input.requestId || !(operation === 'project.batch' || KNOWN_OPERATIONS.has(operation))
+      || READ_ONLY_OPERATIONS.has(operation) || input.preview === true || input.options?.preview === true) return;
+  commandJournal.start({documentId:routeDocument, operation, requestId:input.requestId, rejectedCode:error.code || 'INVALID_COMMAND'});
+}
+function prepareTaskCommand(input, reservationDocument){
   if(!input||typeof input!=='object'||Array.isArray(input))throw new ModelingTaskError('MODELING_TASK_ARGUMENTS','任务 command 必须是对象。',400);
   if(input.operation==='project.batch'){
     if(!input.batchId&&!input.requestId)throw new ModelingTaskError('MODELING_TASK_REQUEST_KEY_REQUIRED','批量任务必须提供稳定的批次身份。',400);
-    const batch=prepareBatchInput(input);
-    return {documentId:batch.document,operation:'project.batch',requestKey:batch.batchId,digest:createHash('sha256').update(stableJson(input)).digest('hex'),outcomeFingerprint:idempotencyFingerprint('project.batch',batchReceiptFields(batch.batchId,batch.steps))};
+    let batch;
+    try { batch=prepareBatchInput(input); }
+    catch (error) { if (reservationDocument) noteRejectedWrite(input,'project.batch',error,reservationDocument); throw error; }
+    return {documentId:batch.document,operation:'project.batch',requestKey:batch.batchId,journalRequestId:input.requestId||batch.batchId,digest:createHash('sha256').update(stableJson(input)).digest('hex'),outcomeFingerprint:idempotencyFingerprint('project.batch',batchReceiptFields(batch.batchId,batch.steps))};
   }
-  const operation=normalizeOperation(String(input.operation||''));validateCommandInput(input,operation);
+  const operation=normalizeOperation(String(input.operation||''));
+  try { validateCommandInput(input,operation); }
+  catch (error) { if (reservationDocument) noteRejectedWrite(input,operation,error,reservationDocument); throw error; }
   if(READ_ONLY_OPERATIONS.has(operation)||input.options?.preview===true||input.preview===true||['document.snapshot','document.restore','step.import','step.export','document.naming.upgrade'].includes(operation))throw new ModelingTaskError('MODELING_TASK_OPERATION_UNSUPPORTED','此路径暂不支持任务取消；请使用原专用工作流。',400);
   const document=documentId(input.documentId),fields=commandRequestFields(input,document);
   if(!fields.clientRequestId)throw new ModelingTaskError('MODELING_TASK_REQUEST_KEY_REQUIRED','任务必须提供稳定的命令去重身份。',400);
   const outcomeFields=['document.undo','document.redo'].includes(operation)?{documentId:document,clientRequestId:fields.clientRequestId}:fields;
-  return {documentId:document,operation,requestKey:fields.clientRequestId,digest:createHash('sha256').update(stableJson(input)).digest('hex'),outcomeFingerprint:idempotencyFingerprint(operation,outcomeFields)};
+  return {documentId:document,operation,requestKey:fields.clientRequestId,journalRequestId:fields.requestId,digest:createHash('sha256').update(stableJson(input)).digest('hex'),outcomeFingerprint:idempotencyFingerprint(operation,outcomeFields)};
+}
+
+function piCadSession(request, id, required = false) {
+  const sessionId = request.headers['x-cad-pi-session'], token = request.headers['x-cad-pi-token'];
+  if (!required && sessionId === undefined && token === undefined) return null;
+  const session = typeof sessionId === 'string' ? piRuntime.get(sessionId) : null;
+  if (!isLivePi(session) || session.documentId !== id || typeof token !== 'string' || !/^[a-f0-9]{64}$/.test(token)
+      || !session.cadToolToken || !timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(session.cadToolToken, 'hex')))
+    throw new ModelingTaskError('PI_CAD_SESSION_FORBIDDEN','助手工具与当前会话或工程不匹配。',403);
+  authorizeModelingTaskRequest(request,webOrigin,port);
+  return session;
+}
+
+function reservePiWrite(request, response, input, meta) {
+  const session = piCadSession(request,meta.documentId);
+  const operation = { ...input, operation:meta.operation };
+  if (!session || !requiresPiWriteApproval(operation)) return undefined;
+  if (operation.operation === 'project.batch' && (operation.steps.length < 2 || operation.steps.length > 16))
+    throw new ModelingTaskError('PI_BATCH_SIZE','助手批次需要 2 到 16 条现有 Body 操作。',400);
+  // Hold the HTTP task registration, not a native queue slot, while the user reviews.
+  const controller = new AbortController();
+  const disconnect = () => controller.abort();
+  response.once('close',disconnect);
+  return (async () => {
+    try {
+      const piApprovalId = await piWriteApprovals.request(session,meta,input.baseStateToken,() =>
+        serializeDocument(meta.documentId,async () => {
+          const view = await command('document.summary',{documentId:meta.documentId});
+          if (!view.ok || !Array.isArray(view.bodyMetadata))
+            throw new ModelingTaskError('PI_APPROVAL_TARGET_UNAVAILABLE','无法核对工程中的受影响对象，请重新读取工程。',503);
+          if (input.baseRevision !== undefined && input.baseRevision !== view.revision)
+            throw new ModelingTaskError('PI_APPROVAL_STALE','原修订号已失效，请让助手重新读取工程和选择对象。');
+          return {revision:view.revision,steps:summarizePiWrite(operation,view)};
+        },{signal:controller.signal}),controller.signal);
+      if (controller.signal.aborted || response.destroyed) {
+        piWriteApprovals.revoke(session,piApprovalId);
+        throw new ModelingTaskError('PI_APPROVAL_CANCELLED','助手连接已中断，未登记写入任务。');
+      }
+      return {piApprovalId};
+    } finally { response.off('close',disconnect); }
+  })();
+}
+
+function claimCommandTask(request, input, id, operation) {
+  const taskId = request.headers['x-cad-task-id'];
+  const session = piCadSession(request,id);
+  if (taskId === undefined) {
+    if (session) throw new ModelingTaskError('PI_APPROVAL_TASK_REQUIRED','助手写入必须提交原建模任务。',403);
+    return {};
+  }
+  authorizeModelingTaskRequest(request,webOrigin,port);
+  if (typeof taskId !== 'string') throw new ModelingTaskError('MODELING_TASK_INVALID','任务标识必须是唯一字符串。',400);
+  const meta = prepareTaskCommand(input);
+  const record = modelingTasks.checked(taskId,id);
+  const approvalId = record.piApprovalId;
+  if (approvalId && !session || session && requiresPiWriteApproval({...input,operation}) && !approvalId)
+    throw new ModelingTaskError('PI_APPROVAL_REQUIRED','助手写入需要当前会话确认，未执行。',403);
+  const beforeExecute = approvalId ? () => piWriteApprovals.consume(session,approvalId,meta) : undefined;
+  return {task:modelingTasks.claim(taskId,meta),beforeExecute};
 }
 
 function prepareBatchInput(input){
@@ -1196,7 +1300,7 @@ function prepareBatchInput(input){
   if(input.protocolVersion!==undefined&&input.protocolVersion!==1)throw new GatewayRequestError('UNSUPPORTED_PROTOCOL','批量请求仅支持 protocolVersion 1。');
   if(input.operation!==undefined&&input.operation!=='project.batch')throw new GatewayRequestError('INVALID_BATCH','批量请求不能伪装成单条命令。');
   for(const field of ['batchId','requestId'])if(input[field]!==undefined&&(typeof input[field]!=='string'||Buffer.byteLength(input[field])>480||/[\u0000-\u001f\u007f]/.test(input[field])))throw new GatewayRequestError('INVALID_REQUEST_KEY','批量请求标识必须是最多 480 字节、不含控制字符的字符串。',{fieldPath:field});
-  const document=documentId(input.documentId),batchId=String(input.batchId||input.requestId||`batch-${requestSequence++}`);
+  const document=documentId(input.documentId),batchId=String(input.batchId||input.requestId||randomUUID());
   if(!Array.isArray(input.steps)||!input.steps.length||input.steps.length>64)throw new GatewayRequestError('INVALID_BATCH','steps must contain between 1 and 64 commands.');
   if(input.preview===true||input.options?.preview===true)throw new GatewayRequestError('BATCH_OPERATION_UNSUPPORTED','批量修改不能作为预览提交。');
   const batchRevision=input.baseRevision===undefined?undefined:Math.trunc(finiteNumber(input.baseRevision,'baseRevision'));
@@ -1368,9 +1472,9 @@ function recordedMutation(id,operation,fields){
   if(!entry)return null;
   return {response:idempotencyMatches(entry,operation,fields)?historyStore.readIdempotency(id,entry):idempotencyConflict(id)};
 }
-function transactionEvent(operation, fields, beforeRevision, afterRevision) {
+function transactionEvent(operation, fields, beforeRevision, afterRevision, eventId = `event-${randomUUID()}`) {
   return {
-    eventId: `event-${randomUUID()}`,
+    eventId,
     requestId: fields.requestId || fields.clientRequestId || null,
     operation,
     beforeRevision: Number.isInteger(beforeRevision) ? beforeRevision : null,
@@ -1577,6 +1681,26 @@ async function recoverLiveCheckpoint(id,history,wasLoaded) {
   }catch(error){historyStore.discard(target);process.stderr.write(`[history] ${id}: live recovery failed: ${error.message}\n`);return history;}
 }
 
+function verifyStepAppend(before, result) {
+  const expected = result.stepImport?.bodyCount;
+  const previousBodies = new Map(before.bodyMetadata.map(body => [body.bodyId, body]));
+  const bodies = new Map((result.bodyMetadata || []).map(body => [body.bodyId, body]));
+  const features = result.features || [];
+  const feature = features.at(-1);
+  const outputs = new Set(feature?.outputBodies);
+  const newBodies = [...bodies.values()].filter(body => !previousBodies.has(body.bodyId));
+  const valid = result.documentId === before.documentId && result.revision === before.revision + 1
+    && Number.isSafeInteger(expected) && expected > 0 && newBodies.length === expected
+    && result.bodyCount === before.bodyCount + expected && bodies.size === result.bodyCount
+    && features.length === before.features.length + 1 && feature?.type === 'import.step'
+    && feature.computedRevision === result.revision && outputs.size === expected && outputs.has(result.activeBodyId)
+    && newBodies.every(body => outputs.has(body.bodyId) && body.topologyRevision === result.revision)
+    && isDeepStrictEqual(features.slice(0, -1), before.features)
+    && [...previousBodies].every(([id, body]) => isDeepStrictEqual(bodies.get(id), body))
+    && ['variables', 'coordinateSystems', 'materials', 'propertyRecords'].every(key => isDeepStrictEqual(result[key], before[key]));
+  if (!valid) throw new GatewayRequestError('STEP_APPEND_UNVERIFIED', '未能验证 STEP 追加保留了原工程，导入未提交。请检查几何 Worker 版本。');
+}
+
 async function executeMutationUnlocked(operation, fields, preparedHistory, onPhase, createReceipt) {
   assertCapabilityPrecondition(fields.workerCapabilityPrecondition,nativeCapabilities());
   const id = fields.documentId || "default";
@@ -1601,6 +1725,7 @@ async function executeMutationUnlocked(operation, fields, preparedHistory, onPha
   checkSelectionPrecondition(operation,fields);
   checkStatePrecondition(id, fields);
   const before = await command("document.summary", { documentId: id });
+  if (operation === 'step.import' && !before.ok) return withHistoryState(before, id);
   if(operation==='step.import'&&fields.baseRevision!==undefined&&before.revision!==fields.baseRevision)throw new GatewayRequestError('STALE_REVISION','工程修订已改变，STEP 未导入；请核对当前工程后重新选择文件。');
   const checkpoint = await ensureCurrentCheckpoint(id, history, before);
   if (checkpoint.error) return checkpoint.error;
@@ -1609,6 +1734,7 @@ async function executeMutationUnlocked(operation, fields, preparedHistory, onPha
   onPhase?.('converting');
   const result = isProjectDataOperation(operation) ? await executeProjectDataOperation(operation, fields) : await command(operation, fields);
   if (!result.ok) return withHistoryState(result, id);
+  if (operation === 'step.import') verifyStepAppend(before, result);
   if(operation==="document.naming.upgrade" && result.importedNamingUpgrade?.changed===false)return withHistoryState(result,id);
   onPhase?.('committing',{report:result.stepImport});
   modelingTasks.beginCommit();
@@ -1696,7 +1822,7 @@ async function recordedMutationBatch(steps,id){
   }
   return null;
 }
-async function executeMutationBatchUnlocked(steps, preparedHistory, receipt) {
+async function executeMutationBatchUnlocked(steps, preparedHistory, receipt, journalEvent) {
   const id=steps[0].fields.documentId||'default';
   const history = preparedHistory || historyStore.repair(id);
   if (history.restoreError) return { response: withHistoryState({ ok: false, code: "HISTORY_RESTORE_FAILED", error: history.restoreError }, id), results: [] };
@@ -1767,7 +1893,7 @@ async function executeMutationBatchUnlocked(steps, preparedHistory, receipt) {
       undo: startsNewDocument(steps[0].operation, steps[0].fields) || !history.current ? [] : appendHistory(history.undo, history.current),
       redo: [],
       restoreError: null,
-      events: [...(history.events || []), ...events],
+      events: [...(history.events || []), ...(journalEvent ? [transactionEvent('project.batch', journalEvent, before.revision, revision, journalEvent.eventId)] : []), ...events],
       idempotency: [...(history.idempotency || []), ...newOutcomes].slice(-historyStore.idempotencyLimit),
     };
     const view = await command("document.view", { documentId: id });
@@ -1813,17 +1939,19 @@ function replaceBatchReferencesForValidation(value) {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceBatchReferencesForValidation(item)]));
 }
 
-function executeMutationBatch(steps, task, batchId) {
+function executeMutationBatch(steps, task, batchId, requestId = batchId || randomUUID(), beforeExecute) {
   const id = steps[0]?.fields?.documentId || "default";
   const startedAt = Date.now();
-  const pending=serializeDocument(id, async () => {
+  const journalEvent = task ? null : {requestId,eventId:`event-${randomUUID()}`};
+  const execute=()=>serializeDocument(id, async () => {
+    beforeExecute?.();
     validateMutationBatch(steps);
     const receipt=task?{batchId,fingerprint:idempotencyFingerprint('project.batch',batchReceiptFields(batchId,steps))}:null;
     if(receipt){const entry=historyStore.get(id).idempotency.find(item=>item.key===idempotencyKey(id,'project.batch',batchId));if(entry){if(entry.fingerprint!==receipt.fingerprint)return {response:idempotencyConflict(id),results:[]};const exact=historyStore.readIdempotency(id,entry);const {results,...response}=exact;return {response,results};}}
     const replay=await recordedMutationBatch(steps,id);
     if(receipt&&replay?.response?.ok)throw new ModelingTaskError('MODELING_TASK_BATCH_RECEIPT_MISSING','此批次仅保留旧版分步回执，无法证明原始整批结果；请读取工程，不要重新执行。');
     if(!replay)for(const step of steps)assertCapabilityPrecondition(step.fields.workerCapabilityPrecondition,nativeCapabilities());
-    const result = replay || await projectTransactions.run(id,history=>executeMutationBatchUnlocked(steps,history,receipt),{success:value=>value.response?.ok});
+    const result = replay || await projectTransactions.run(id,history=>executeMutationBatchUnlocked(steps,history,receipt,journalEvent),{success:value=>value.response?.ok});
     if(!result.response?.ok)result.results=failedBatchResults(steps,result.results || [],result.response);
     steps.forEach((step, index) => logCommand(step.operation, step.fields, result.results[index] || result.response, startedAt));
     return result;
@@ -1832,7 +1960,8 @@ function executeMutationBatch(steps, task, batchId) {
     if(restored||notStarted){const provisional=error.batchProvisional||[],attempted=error.batchAttemptedCount||0;error.batchOutcome={batch:{state:restored?'rolled-back':'not-started',count:steps.length},results:failedBatchResults(steps,steps.map((_,index)=>provisional[index]||(index<attempted?{ok:false,code:error.code,error:error.message}:undefined)),{code:error.code,error:error.message})};}
     delete error.batchProvisional;delete error.batchAttemptedCount;throw error;
   });
-  return task?modelingTasks.finish(task,pending,result=>result.response):pending;
+  return task ? modelingTasks.finish(task, execute(), result => result.response)
+    : commandJournal.track({documentId:id, operation:'project.batch', requestId, startedAt, eventId:journalEvent.eventId}, execute, result => result.response);
 }
 async function executePreviewUnlocked(operation, fields) {
   assertCapabilityPrecondition(fields.workerCapabilityPrecondition,nativeCapabilities());
@@ -1894,7 +2023,8 @@ function serializeDocument(id, action, {loadDocument=true,inputBytes=0,task,sign
 function executeMutation(operation, fields, onPhase, task, {finishTask=true,beforeExecute}={}) {
   const id = fields.documentId || "default";
   const startedAt = Date.now();
-  const pending=serializeDocument(id, async () => {
+  if (!fields.requestId && !fields.clientRequestId) fields = {...fields, requestId: randomUUID()};
+  const execute=()=>serializeDocument(id, async () => {
     try {
       onPhase?.('preparing');
       await beforeExecute?.();
@@ -1909,10 +2039,13 @@ function executeMutation(operation, fields, onPhase, task, {finishTask=true,befo
       throw error;
     }
   },{inputBytes:Buffer.byteLength(JSON.stringify(fields)),task});
-  return task&&finishTask?modelingTasks.finish(task,pending):pending;
+  if (task) return finishTask ? modelingTasks.finish(task, execute()) : execute();
+  const receiptKey = idempotencyKey(id, operation, fields.clientRequestId);
+  return commandJournal.track({documentId:id, operation, requestId:fields.requestId || fields.clientRequestId, startedAt, receiptKey,
+    fingerprint:receiptKey ? idempotencyFingerprint(operation, fields) : undefined}, execute);
 }
 
-async function moveHistoryUnlocked(id, direction, clientRequestId = "", preparedHistory) {
+async function moveHistoryUnlocked(id, direction, clientRequestId = "", preparedHistory, requestId) {
   const history = preparedHistory || historyStore.repair(id);
   if (history.restoreError) {
     return withHistoryState({
@@ -1941,7 +2074,7 @@ async function moveHistoryUnlocked(id, direction, clientRequestId = "", prepared
   if(restoredSchema)projectDataStore.replaceSnapshot(id,restoredSchema,{preserveUpdatedAt:true});
 
   const view = await command("document.view", { documentId: id });
-  const event = transactionEvent(`document.${direction}`, { clientRequestId }, before.revision, view.revision);
+  const event = transactionEvent(`document.${direction}`, { clientRequestId, requestId }, before.revision, view.revision);
   event.propertyState=restoredSchema?"restored":"legacy-preserved";
   const nextHistory = {...history,...(direction === "undo"
     ? {
@@ -1979,7 +2112,8 @@ function moveHistory(id, direction, clientRequestId = "", precondition = {}, tas
   const cacheKey = idempotencyKey(id, operation, clientRequestId);
   const fingerprint = idempotencyFingerprint(operation, { documentId: id, clientRequestId });
   const startedAt = Date.now();
-  const pending=serializeDocument(id, async () => {
+  const requestId = precondition.requestId || clientRequestId || randomUUID();
+  const execute=()=>serializeDocument(id, async () => {
     const history = historyStore.get(id);
     const persisted = cacheKey ? (history.idempotency || []).find((entry) => entry.key === cacheKey) : null;
     if (persisted) {
@@ -1989,7 +2123,7 @@ function moveHistory(id, direction, clientRequestId = "", precondition = {}, tas
     let result;
     try {
       checkStatePrecondition(id,precondition);
-      result = await projectTransactions.run(id,history=>moveHistoryUnlocked(id, direction, clientRequestId,history));
+      result = await projectTransactions.run(id,history=>moveHistoryUnlocked(id, direction, clientRequestId,history,requestId));
       logCommand(operation, { documentId: id, clientRequestId }, result, startedAt);
     } catch (error) {
       logCommand(operation, { documentId: id, clientRequestId }, null, startedAt, error);
@@ -1997,7 +2131,8 @@ function moveHistory(id, direction, clientRequestId = "", precondition = {}, tas
     }
     return result;
   },{inputBytes:Buffer.byteLength(JSON.stringify(precondition)),task});
-  return task?modelingTasks.finish(task,pending):pending;
+  return task ? modelingTasks.finish(task, execute()) : commandJournal.track({documentId:id, operation,
+    requestId, startedAt, receiptKey:cacheKey, fingerprint}, execute);
 }
 
 
@@ -2029,7 +2164,24 @@ const server = createServer(async (request, response) => {
       void shutdown('local-control');sendJson(response,202,{ok:true,state:'draining',budgetMs:shutdownBudgetMs});return;
     }
     if(shuttingDown){response.setHeader('Connection','close');sendJson(response,503,{ok:false,code:'SERVICE_STOPPING',error:'后台正在停止，未接收新请求；请在恢复后核对工程。'});return;}
-    if(await handleModelingTaskRoute({request,response,url,service:modelingTasks,readJson,prepareCommand:prepareTaskCommand,sendJson,webOrigin,port}))return;
+    if(await handleModelingTaskRoute({request,response,url,service:modelingTasks,readJson,prepareCommand:prepareTaskCommand,beforeReserve:reservePiWrite,sendJson,webOrigin,port}))return;
+    const commandJournalMatch=url.pathname.match(/^\/api\/documents\/([A-Za-z0-9_-]{1,64})\/command-journal$/);
+    if (commandJournalMatch) {
+      authorizeModelingTaskRequest(request,webOrigin,port);
+      const id=commandJournalMatch[1], requestId=url.searchParams.get('requestId');
+      requestDocumentId=id;
+      if (!(request.method === 'GET' || request.method === 'DELETE')) throw new ModelingTaskError('COMMAND_JOURNAL_METHOD','命令日志支持读取和清理已完成记录。',405);
+      if ([...url.searchParams].length > (request.method === 'GET' && requestId ? 1 : 0) || (requestId && Buffer.byteLength(requestId) > 512))
+        throw new ModelingTaskError('COMMAND_JOURNAL_ARGUMENTS','命令日志的请求 ID 无效。',400);
+      response.setHeader('Cache-Control','no-store');
+      try {
+        const removed = request.method === 'DELETE' ? commandJournal.clearCompleted(id) : undefined;
+        sendJson(response,200,{ok:true,documentId:id,entries:commandJournal.list(id,requestId),removed});
+      } catch {
+        throw new ModelingTaskError('COMMAND_JOURNAL_UNAVAILABLE','工程命令日志暂时无法读取或保存。',503);
+      }
+      return;
+    }
     if(await handleSourceRestoreRoute({request,response,url,service:sourceRestores,webOrigin,port,sendJson}))return;
     if(url.pathname==='/api/source-catalog'&&['GET','POST','DELETE'].includes(request.method)){
       const id='@storage',audit=request.method==='POST'?storageSourceAudits.start(id):request.method==='DELETE'?storageSourceAudits.cancel(id):storageSourceAudits.get(id);sendJson(response,request.method==='POST'?202:200,{ok:true,documentId:id,audit});return;
@@ -2120,10 +2272,32 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, { ok: true, protocolVersion: 2, sessionId: session.sessionId, documentId: id, streamId:session.streamId,eventCursor:stateResponse.transport.eventCursor, state });
       return;
     }
+    const piApprovalMatch = url.pathname.match(/^\/api\/pi\/sessions\/([A-Za-z0-9_-]{1,80})\/write-approval$/);
+    if (piApprovalMatch) {
+      authorizeModelingTaskRequest(request,webOrigin,port);
+      const session = piRuntime.get(piApprovalMatch[1]);
+      const id = url.searchParams.get('documentId'), streamId = url.searchParams.get('streamId');
+      if ([...url.searchParams].length !== 2 || !isLivePi(session) || session.documentId !== id || session.streamId !== streamId)
+        throw new ModelingTaskError('PI_APPROVAL_INACTIVE','确认会话已变化，请重新连接。');
+      requestDocumentId = id;
+      response.setHeader('Cache-Control','no-store');
+      let approval;
+      if (request.method === 'GET') approval = piWriteApprovals.get(session);
+      else if (request.method === 'POST') {
+        const input = await readJson(request);
+        if (!input || Array.isArray(input) || Object.keys(input).length !== 2 || typeof input.id !== 'string'
+            || !['approve','cancel'].includes(input.decision))
+          throw new ModelingTaskError('PI_APPROVAL_ARGUMENTS','确认只接受原确认 ID 和决定。',400);
+        approval = piWriteApprovals.decide(session,input.id,input.decision);
+      } else throw new ModelingTaskError('PI_APPROVAL_METHOD','此接口只支持读取和提交确认决定。',405);
+      sendJson(response,200,{ok:true,documentId:id,streamId,approval});
+      return;
+    }
     const piSessionMatch = url.pathname.match(/^\/api\/pi\/sessions\/([A-Za-z0-9_-]{1,80})(?:\/(commands|events))?$/);
     if (piSessionMatch) {
       const session = piRuntime.get(piSessionMatch[1]);
       if (request.method === "DELETE" && !piSessionMatch[2]) {
+        if (session) piWriteApprovals.revoke(session);
         await piRuntime.remove(piSessionMatch[1]);
         sendJson(response, 200, { ok: true, protocolVersion: 1, sessionId: piSessionMatch[1] });
         return;
@@ -2143,6 +2317,7 @@ const server = createServer(async (request, response) => {
         if(input.streamId!==undefined&&input.streamId!==session.streamId)throw new GatewayRequestError('PI_STREAM_CHANGED','Pi 事件流已变化，未执行旧连接的命令；请重新同步会话。');
         if(input.documentId!==undefined&&input.documentId!==session.documentId)throw new GatewayRequestError('PI_SESSION_DOCUMENT_MISMATCH','Pi 会话不属于当前工程，命令未执行。');
         const commandInput = input.command && typeof input.command === "object" ? input.command : input;
+        if (commandInput.type === 'abort' || commandInput.type === 'new_session') piWriteApprovals.revoke(session);
         const result = await session.request(commandInput);
         const {transport,...nativeResponse}=result;
         sendJson(response, 200, { ok: true, protocolVersion: 2, sessionId: session.sessionId,documentId:session.documentId,streamId:transport.streamId,eventCursorBefore:transport.eventCursorBefore,eventCursor:transport.eventCursor, response: nativeResponse });
@@ -2474,12 +2649,14 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/command-batches") {
       const input = await readJson(request);
-      const {document,batchId,steps}=prepareBatchInput(input);
+      let batch;
+      try { batch=prepareBatchInput(input); }
+      catch (error) { noteRejectedWrite(input,'project.batch',error); throw error; }
+      const {document,batchId,steps}=batch;
       requestTraceId = String(input.requestId || batchId);
       requestDocumentId=document;
-      let task;const taskId=request.headers['x-cad-task-id'];
-      if(taskId!==undefined){authorizeModelingTaskRequest(request,webOrigin,port);if(typeof taskId!=='string')throw new ModelingTaskError('MODELING_TASK_INVALID','任务标识必须是唯一字符串。',400);task=modelingTasks.claim(taskId,prepareTaskCommand(input));}
-      const result = await executeMutationBatch(steps,task,batchId);
+      const {task,beforeExecute} = claimCommandTask(request,input,document,'project.batch');
+      const result = await executeMutationBatch(steps,task,batchId,requestTraceId,beforeExecute);
       sendJson(response, statusFor(result.response), { ...result.response, batchId, results: result.results,...(task?{modelingTask:modelingTasks.get(document,task.taskId)}:{}) });
       return;
     }
@@ -2489,13 +2666,12 @@ const server = createServer(async (request, response) => {
       requestTraceId = String(input.requestId || requestTraceId || "");
       requestDocumentId = input.documentId || null;
       const operation = normalizeOperation(String(input.operation || ""));
-      validateCommandInput(input, operation);
+      try { validateCommandInput(input, operation); }
+      catch (error) { noteRejectedWrite(input,operation,error); throw error; }
       const id = documentId(input.documentId);
       if (["document.snapshot", "document.restore", "step.import", "step.export"].includes(operation))
         throw new Error("Use the dedicated persistence or STEP routes for this operation.");
-      let task;
-      const taskId=request.headers['x-cad-task-id'];
-      if(taskId!==undefined){authorizeModelingTaskRequest(request,webOrigin,port);if(typeof taskId!=='string')throw new ModelingTaskError('MODELING_TASK_INVALID','任务标识必须是唯一字符串。',400);task=modelingTasks.claim(taskId,prepareTaskCommand(input));}
+      const {task,beforeExecute} = claimCommandTask(request,input,id,operation);
       if (operation === "document.undo" || operation === "document.redo") {
         const result = await moveHistory(id, operation === "document.undo" ? "undo" : "redo", input.options?.idempotencyKey || input.idempotencyKey || input.requestId || "", input,task);
         sendJson(response, statusFor(result), task?{...result,modelingTask:modelingTasks.get(id,task.taskId)}:result);
@@ -2526,7 +2702,7 @@ const server = createServer(async (request, response) => {
       } else if (preview) {
         result = await executePreview(operation, fields);
       } else {
-        result = await executeMutation(operation, fields,undefined,task);
+        result = await executeMutation(operation, fields,undefined,task,{beforeExecute});
       }
       // Mutation outcomes already carry their original commit state. Replacing
       // their history here would mix an old replayed model with a new event.

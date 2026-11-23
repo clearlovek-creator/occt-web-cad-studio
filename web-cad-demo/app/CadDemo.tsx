@@ -16,7 +16,7 @@ import { FeatureHistoryControls } from "./FeatureHistoryControls";
 import {failedSelectionTarget} from "./FeatureReferenceRepair";
 import type {FeatureRepairProposal} from "./modeling/feature-input";
 import { CommandChrome } from "./workbench/CommandChrome";
-import { CommandJournal } from "./workbench/CommandJournal";
+import { CommandJournal, type JournalIdentity } from "./workbench/CommandJournal";
 import {ModelingTaskStatus} from './workbench/ModelingTaskStatus';
 import {StepImportStatus} from './workbench/StepImportStatus';
 import { ProjectTree } from "./workbench/ProjectTree";
@@ -25,9 +25,10 @@ import { pruneBodyRenderables } from "./model/render-cache";
 import { viewportHealth } from "./model/viewport-health";
 import {createViewportFrame} from './model/viewport-frame';
 import {MeshWireLayer} from './model/mesh-wire-layer';
-import { gridDragDimensionText, gridDragHeightReference, gridDragInstruction, gridDragSteps, hasDragFootprintMovement, hasDragHeightAdjustment, heightFromScreenDrag, needsDragHeight, shouldSwitchModelingMethod, type GridDragKind } from "./modeling/grid-drag";
+import { gridDragDimensionText, gridDragHeightReference, gridDragInstruction, gridDragSteps, hasDragFootprintMovement, hasDragHeightAdjustment, heightFromScreenDrag, needsDragHeight, shouldSwitchModelingMethod, type GridDragKind, type GridPoint } from "./modeling/grid-drag";
 import { dragPreviewGeometry } from "./modeling/grid-drag-preview";
 import {constructionFrame,constructionToWorld,constructionDragCommand,snappedConstructionPoint,dragDimension,GLOBAL_CONSTRUCTION_COORDINATE,type ConstructionFrame} from "./modeling/construction-frame";
+import { constructionSnapCandidates, pickConstructionSnap, type EdgeSnapPoints } from "./modeling/construction-snap";
 import {alignConstructionGrid,constructionMatrix,createConstructionGrid} from "./modeling/construction-frame-three";
 import {ConstructionControls} from "./workbench/ConstructionControls";
 import { useModelingController, workspaceFileName,ModelingCommandError } from "./modeling/modeling-controller";
@@ -39,6 +40,7 @@ import {SourceAuditPanel} from './SourceAuditPanel';
 import {SourceRecoveryBanner} from './workbench/SourceRecoveryBanner';
 import { ProjectLoadStatus } from "./workbench/ProjectLoadStatus";
 import { OperationWindow } from "./workbench/OperationWindow";
+import { WorkbenchDialog } from "./workbench/WorkbenchDialog";
 import { StudioIcon } from "./workbench/StudioIcon";
 import { CommandDock, PropertiesDock, defaultStudioPanels, studioPanels, type SelectionDetails, type StudioPanel } from "./workbench/StudioPanels";
 import { PiModelingAgentPanel } from "./PiModelingAgentPanel";
@@ -71,10 +73,9 @@ import type { ModelingCommandInput, ModelingCommandResponse } from "./modeling/c
 
 type SelectionMode = "body" | "face" | "edge";
 type StandardView = "iso" | "top" | "front" | "right" | "back";
-type OperationKind = "primitives" | "surfaces" | "transform" | "boolean" | "agent" | "agentSettings" | "mesh" | "pattern" | "patternCircular" | "patternRectangular" | "patternMirror" | "revolve" | "shapeCheck" | "measure" | "fillet" | "chamfer" | "draft" | "offsetFeature" | "exchange" | "properties" | "propertyTypes" | "history" | "projectData" | "capabilities" | "bodyAppearance" | "generated" | "workspace" | "sources" | "backups" | "nameBeforeSave";
+type OperationKind = "primitives" | "surfaces" | "transform" | "boolean" | "agent" | "agentSettings" | "mesh" | "pattern" | "patternCircular" | "patternRectangular" | "patternMirror" | "revolve" | "shapeCheck" | "measure" | "fillet" | "chamfer" | "draft" | "offsetFeature" | "exchange" | "properties" | "propertyTypes" | "history" | "projectData" | "capabilities" | "bodyAppearance" | "generated" | "workspace" | "sources" | "backups";
 
 const OPERATION_META: Record<OperationKind, { title: string; subtitle: string }> = {
-  nameBeforeSave: { title: "保存工程", subtitle: "输入工程名称后生成备份" },
   backups:{title:'工程备份管理',subtitle:'独立备份目录 · 原始版本下载 · 文件维护'},
   sources:{title:'工程来源与引用',subtitle:'来源检查 · 恢复记录 · 旧工程引用升级'},
   workspace: { title: "工程管理与恢复", subtitle: "工程名称 · 后台恢复快照 · 下载备份状态" },
@@ -110,6 +111,7 @@ const OPERATION_META: Record<OperationKind, { title: string; subtitle: string }>
 type EdgeData = {
   edgeId: string;
   points: number[];
+  snap?: EdgeSnapPoints;
 };
 
 type BodyPresentation = {
@@ -159,7 +161,15 @@ const defaultEdgeColor = 0x203040;
 const selectionColor = 0xffb14a;
 const selectionEmissive = 0x3a1b00;
 const bodySelectionColor = 0x688fc6;
-const dockedOperations = new Set<OperationKind>(["primitives", "surfaces", "transform", "fillet", "chamfer", "draft", "revolve", "offsetFeature", "shapeCheck", "bodyAppearance"]);
+const dockedOperations = new Set<OperationKind>(["primitives", "surfaces", "transform", "boolean", "pattern", "patternCircular", "patternRectangular", "patternMirror", "fillet", "chamfer", "draft", "revolve", "offsetFeature", "generated", "history", "shapeCheck", "bodyAppearance"]);
+
+type DocumentOwner = { documentId: string; stateToken: string | null };
+type ProjectSwitch = DocumentOwner & { label: string; run: () => Promise<void> };
+type DeleteConfirmation = DocumentOwner & { title: string; description: string; run: () => Promise<void> };
+function ownsDocumentState(intent: DocumentOwner) {
+  const snapshot = modelingController.getSnapshot();
+  return snapshot.documentId === intent.documentId && snapshot.stateToken === intent.stateToken;
+}
 
 function disposeObject(object: THREE.Object3D) {
   object.traverse((child) => {
@@ -208,7 +218,7 @@ export default function CadDemo() {
       if (!panelMenuRef.current?.contains(event.target as Node)) setPanelMenuOpen(false);
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented || (event.target instanceof Element && event.target.closest("dialog[open]"))) return;
       event.preventDefault();
       setPanelMenuOpen(false);
       panelMenuRef.current?.querySelector("button")?.focus();
@@ -252,8 +262,8 @@ export default function CadDemo() {
   const dragModelingRef = useRef(false);
   const dragSessionRef=useRef<CommandEditSession|null>(null);
   const dragPrimitiveRef = useRef<GridDragKind>("box");
-  const dragStartRef = useRef<THREE.Vector3 | null>(null);
-  const dragEndRef = useRef<THREE.Vector3 | null>(null);
+  const dragStartRef = useRef<GridPoint | null>(null);
+  const dragEndRef = useRef<GridPoint | null>(null);
   const dragStageRef = useRef<"idle" | "base" | "height">("idle");
   const dragHeightRef = useRef(20);
   const dragCommittingRef = useRef(false);
@@ -327,6 +337,7 @@ export default function CadDemo() {
   const [assemblyProgress, setAssemblyProgress] = useState<number | null>(null);
   const [selectionRect, setSelectionRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [dragModeling, setDragModeling] = useState(false);
+  const [preferDragModeling, setPreferDragModeling] = useState(false);
   const [dragPrimitive, setDragPrimitive] = useState<GridDragKind>("box");
   const [dragPreview, setDragPreview] = useState<{ width: number; depth: number; height: number; x: number; y: number } | null>(null);
   const [dragStage, setDragStage] = useState<"idle" | "base" | "height">("idle");
@@ -341,9 +352,18 @@ export default function CadDemo() {
   const [viewportEpoch, setViewportEpoch] = useState(0);
   const [activeOperation, setOperation] = useState<OperationKind | null>(null);
   const [saveName, setSaveName] = useState("");
-  const [saveNameOwner, setSaveNameOwner] = useState<string | null>(null);
+  const [saveNamePrompt, setSaveNamePrompt] = useState<{ documentId: string; copy: boolean } | null>(null);
   const [saveNameError, setSaveNameError] = useState<string | null>(null);
   const savingProjectRef = useRef(false);
+  const checkingSwitchRef = useRef(false);
+  const [projectSwitch, setProjectSwitch] = useState<ProjectSwitch | null>(null);
+  const switchAfterSave = useRef<ProjectSwitch | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<DeleteConfirmation | null>(null);
+  const confirmDeletion = useCallback((title: string, description: string, run: () => Promise<void>) => {
+    if (modelingController.hasPendingMutation()) return;
+    const { documentId, stateToken } = modelingController.getSnapshot();
+    setDeleteConfirmation({ documentId, stateToken, title, description, run });
+  }, []);
   const [commandTabVersion, setCommandTabVersion] = useState(0);
   const setActiveOperation = useCallback((operation: OperationKind | null) => {
     setOperation(operation);
@@ -373,6 +393,8 @@ export default function CadDemo() {
   const [constructionSelection,setConstructionSelection]=useState(()=>({documentId:modelingController.getSnapshot().documentId,id:"global"}));
   const constructionId=constructionSelection.documentId===controllerState.documentId?constructionSelection.id:"global";
   const [snapStep,setSnapStep]=useState(1);
+  const [geometrySnap, setGeometrySnap] = useState(true);
+  const geometrySnapRef = useRef(true);
   const constructionCoordinates=model?.coordinateSystems?.length?model.coordinateSystems:[GLOBAL_CONSTRUCTION_COORDINATE];
   const constructionInfo=useMemo(()=>{
     const coordinate=constructionId==="global"?GLOBAL_CONSTRUCTION_COORDINATE:constructionCoordinates.find(item=>item.id===constructionId);
@@ -409,9 +431,9 @@ export default function CadDemo() {
   const workspace=useWorkspaceMetadata(controllerState.documentId,model?.revision,`${activity?.requestId}:${activity?.status}`);
   const commandBusy = busy || controllerState.busy;
   const commandError = error || controllerState.error?.error || null;
-  const clearDocumentJournal = () => {
+  const clearDocumentJournal = (confirmed: JournalIdentity[]) => {
     const previous = modelingController.getSnapshot().error;
-    modelingController.clearCommandLog(controllerState.documentId);
+    modelingController.clearCommandLog(controllerState.documentId, confirmed);
     if (previous && !modelingController.getSnapshot().error) setError(message => message === previous.error ? null : message);
   };
   useEffect(()=>{if(activity?.status!=='cancelled'||activity.documentId!==controllerState.documentId)return;const latest=modelingController.getSnapshot().commandLog.at(-1);if(latest?.requestId!==activity.requestId)return;setError(value=>value===activity.message?null:value);setStatus(activity.operation==='project.backup.download'?'已停止下载，后台备份仍保留。':'已取消操作，工程未提交此项修改。');},[activity?.requestId,activity?.status,activity?.documentId,activity?.message,activity?.operation,controllerState.documentId]);
@@ -443,7 +465,7 @@ export default function CadDemo() {
       setContextMenu(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || (event.target instanceof Element && event.target.closest("dialog[open]"))) return;
       event.preventDefault();
       setContextMenu(null);
       mountRef.current?.focus({ preventScroll: true });
@@ -517,9 +539,17 @@ export default function CadDemo() {
   const rememberParameterInput = useCallback((kind: GridDragKind, parameters: Record<string, unknown>) => {
     parameterInputRef.current = { kind, parameters };
   }, []);
+  const exitDragModeling = useCallback(() => {
+    dragModelingRef.current = false;
+    cancelDragRef.current();
+    setDragModeling(false);
+    setActiveTool(tool => tool?.startsWith("primitive.") || tool?.startsWith("surface.") ? null : tool);
+    if (!dragCommittingRef.current) setStatus("已退出拖拽建模，可在视口拾取几何。");
+  }, []);
   const changeModelingMethod = useCallback((drag: boolean) => {
     if(sourceRecoveryBlocked){setStatus('来源事务待复核，暂不能开始建模，请查看恢复记录。');return;}
     if (dragCommittingRef.current || modelingController.hasPendingMutation()) return;
+    setPreferDragModeling(drag);
     if (drag && dragModelingRef.current) return;
     if (!drag && (activeOperation === "primitives" || activeOperation === "surfaces")) {
       setActiveOperation(activeOperation);
@@ -966,6 +996,7 @@ export default function CadDemo() {
           line.layers.set(edgeLayer);
           placeViewportObject(line,origin);
           line.userData.edgeId = edge.edgeId;
+          line.userData.snap = edge.snap;
           line.userData.bodyId = presentation.bodyId;
           line.userData.kind = "edge";
           line.visible = visible;
@@ -1442,6 +1473,11 @@ export default function CadDemo() {
     clearHighlight();
   }, [clearHighlight]);
 
+  const selectViewportMode = useCallback((mode: SelectionMode) => {
+    if (dragModeling) exitDragModeling();
+    changeSelectionMode(mode);
+  }, [changeSelectionMode, dragModeling, exitDragModeling]);
+
   const selectBodyFromTree = useCallback(async (bodyId: string) => {
     handlePreparationPreview(null);
     selectionModeRef.current = "body";
@@ -1722,23 +1758,32 @@ export default function CadDemo() {
     gridRef.current = grid;
     alignConstructionGrid(grid,constructionFrameRef.current,gridVisibleRef.current);
 
-    const snapGridPoint = (event: PointerEvent) => {
+    let snapCache: { lines: THREE.Line[]; frame: string; candidates: ReturnType<typeof constructionSnapCandidates> } | null = null;
+    const snapConstructionPoint = (event: PointerEvent): GridPoint | null => {
       const rect = mount.getBoundingClientRect();
-      if (!rect.width || !rect.height) return null;
+      const frame = dragFrameRef.current || constructionFrameRef.current;
+      if (!rect.width || !rect.height || !frame) return null;
       const mouse = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
-      const ray = new THREE.Raycaster();
       // Standard-view changes can precede the next animation frame. Picking must
       // use that view immediately, not the previous frame's camera transform.
       camera.updateMatrixWorld();
+      if (geometrySnapRef.current) {
+        const lines = edgeLinesRef.current;
+        if (snapCache?.lines !== lines || snapCache.frame !== frame.signature) {
+          snapCache = { lines, frame: frame.signature, candidates: constructionSnapCandidates(lines, frame) };
+        }
+        const geometryPoint = pickConstructionSnap(snapCache.candidates, mouse, rect.width, rect.height, camera, bodyMeshesRef.current);
+        if (geometryPoint) return geometryPoint;
+      }
+      const ray = new THREE.Raycaster();
       ray.setFromCamera(mouse, camera);
-      const frame=dragFrameRef.current || constructionFrameRef.current;
-      if(!frame)return null;
       const point = ray.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(new THREE.Vector3(...frame.z),new THREE.Vector3(...frame.origin)), new THREE.Vector3());
       if (!point) return null;
-      return new THREE.Vector3(...snappedConstructionPoint(frame,point.toArray() as [number,number,number],dragFrameRef.current?dragStepRef.current:snapStepRef.current));
+      const [x, y] = snappedConstructionPoint(frame, [point.x, point.y, point.z], dragFrameRef.current ? dragStepRef.current : snapStepRef.current);
+      return { x, y };
     };
     const hideSnapMarker = () => snapMarkerRef.current?.removeAttribute("data-point");
-    const updateSnapMarker = (point: THREE.Vector3 | null) => {
+    const updateSnapMarker = (point: GridPoint | null) => {
       const marker = snapMarkerRef.current;
       const frame = dragFrameRef.current || constructionFrameRef.current;
       if (!marker || !frame || !point) { hideSnapMarker(); return; }
@@ -1747,6 +1792,8 @@ export default function CadDemo() {
       marker.style.left = `${(projected.x + 1) * 50}%`;
       marker.style.top = `${(1 - projected.y) * 50}%`;
       marker.dataset.point = `${dragDimension(point.x)},${dragDimension(point.y)}`;
+      marker.dataset.kind = point.snap || "grid";
+      marker.dataset.label = point.snap === "endpoint" ? "端点" : point.snap === "midpoint" ? "边中点" : "";
     };
     let dragPreviewKey = "";
     mount.dataset.dragPreviewBuilds = "0";
@@ -1761,6 +1808,7 @@ export default function CadDemo() {
         disposeObject(dragGhostRef.current);
         dragGhostRef.current = null;
       }
+      if (dragStartRef.current) pointerStartRef.current = null;
       dragStartRef.current = null;
       dragEndRef.current = null;
       dragHeightAdjustedRef.current = false;
@@ -1770,14 +1818,18 @@ export default function CadDemo() {
     };
     cancelDragRef.current = clearDragGhost;
     const onDragKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") clearDragGhost();
-      if (event.key === "Backspace" && dragModelingRef.current && dragStageRef.current === "height"
+      if (!dragModelingRef.current || event.defaultPrevented || event.isComposing) return;
+      if (event.key === "Escape" && !event.repeat) {
+        event.preventDefault();
+        exitDragModeling();
+      }
+      if (event.key === "Backspace" && dragStageRef.current === "height"
         && !(event.target instanceof HTMLElement && event.target.closest('input,textarea,select,[contenteditable="true"]'))) {
         event.preventDefault(); reselectDragBaseRef.current();
       }
     };
     window.addEventListener("keydown", onDragKey);
-    const updateDragGhost = (start: THREE.Vector3, end: THREE.Vector3) => {
+    const updateDragGhost = (start: GridPoint, end: GridPoint) => {
       const kind = dragPrimitiveRef.current;
       const frame=dragFrameRef.current;
       if(!frame)return;
@@ -1860,19 +1912,20 @@ export default function CadDemo() {
       if (event.button === 0 && event.shiftKey && !dragStartRef.current) {
         pointerStartRef.current = null;
       } else if (event.button === 0 && dragModelingRef.current) {
-        if (modelingController.hasPendingMutation()) return;
+        if (preparationGroupRef.current || modelingController.hasPendingMutation()) return;
         if(!constructionFrameRef.current){setStatus("当前构造坐标系无效，请先重新选择。");return;}
-        const point = snapGridPoint(event);
-        if (!point && dragStageRef.current === "idle") {
-          setStatus("当前视线平行于构造面，请点击“正视构造面”或切换轴测视图后绘制。");
-          return;
-        }
-        if (point && dragStageRef.current === "idle") {
+        if (dragStageRef.current === "idle") {
+          const point = snapConstructionPoint(event);
+          if (!point) {
+            setStatus("当前视线平行于构造面，请点击“正视构造面”或切换轴测视图后绘制。");
+            return;
+          }
           const session=new CommandEditSession(modelingController,{documentId:modelingController.getSnapshot().documentId,revision:modelRef.current?.revision??null,stateToken:modelRef.current?.stateToken??null});
           if(!session.isReady() || session.isStale()){setStatus("几何显示正在同步工程状态，请等待后再绘制。");return;}
           dragSessionRef.current=session;
           dragFrameRef.current=constructionFrameRef.current;dragStepRef.current=snapStepRef.current;
           dragStartRef.current = point;
+          updateSnapMarker(point);
           dragFootprintAnchorRef.current = { x: event.clientX, y: event.clientY };
           dragStageRef.current = "base"; setDragStage("base"); dragHeightRef.current = 20;
         }
@@ -1904,10 +1957,10 @@ export default function CadDemo() {
           const pixelScale = viewportViewHeight(camera, depth) / rect.height;
           dragHeightRef.current = heightFromScreenDrag(deltaX, deltaY, topView ? 0 : ax, topView ? 0 : ay, pixelScale,dragStepRef.current);
           updateDragGhost(dragStartRef.current, dragEndRef.current);
-        } else { const point = snapGridPoint(event); updateSnapMarker(point); if (point) { dragEndRef.current = point; updateDragGhost(dragStartRef.current, point); } }
+        } else { const point = snapConstructionPoint(event); updateSnapMarker(point); if (point) { dragEndRef.current = point; updateDragGhost(dragStartRef.current, point); } }
         return;
       }
-      if (dragModelingRef.current && !preparationGroupRef.current) updateSnapMarker(snapGridPoint(event));
+      if (dragModelingRef.current && !preparationGroupRef.current) updateSnapMarker(snapConstructionPoint(event));
       const box = boxSelectRef.current;
       if (!box || event.buttons !== 1) return;
       const distance = Math.hypot(event.clientX - box.startX, event.clientY - box.startY);
@@ -1941,16 +1994,16 @@ export default function CadDemo() {
           event.clientX - dragFootprintAnchorRef.current.x,
           event.clientY - dragFootprintAnchorRef.current.y,
         )) {
-          setStatus("起点已确定，移动鼠标绘制底面，再点击锁定；Esc 取消。");
+          setStatus("起点已确定，移动鼠标绘制底面，再点击锁定；Esc 退出拖拽建模。");
           return;
         }
-        const origin = dragStartRef.current.clone();
-        const point = dragStageRef.current === "height" ? dragEndRef.current : snapGridPoint(event);
+        const origin = dragStartRef.current;
+        const point = dragStageRef.current === "height" ? dragEndRef.current : snapConstructionPoint(event);
         const kind = dragPrimitiveRef.current;
         if (!point) return;
         const command = dragFrameRef.current?constructionDragCommand(kind, origin, point, dragStepRef.current, dragHeightRef.current,dragFrameRef.current):null;
         if (!command) {
-          setStatus("移动鼠标确定底面，点击确认；Esc 取消");
+          setStatus("移动鼠标确定底面，点击确认；Esc 退出拖拽建模。");
           return;
         }
         if (dragStageRef.current === "height" && !dragHeightAdjustedRef.current) {
@@ -1970,13 +2023,14 @@ export default function CadDemo() {
         dragCommittingRef.current = true;
         setBusy(true);
         setError(null);
-        setStatus("正在根据网格拖拽创建几何…");
+        setStatus("正在创建拖拽几何…");
         try {
           if(!drawingSession)throw new Error("绘制基线已失效，请重新绘制。");
           const result = await drawingSession.execute<ModelData>({ operation: command.operation, parameters: command.parameters });
+          exitDragModeling();
           // Keep screen-to-world placement stable for the next primitive.
           displayModel(result, { fitCamera: false });
-          setStatus(`拖拽创建完成 · ${dragDimension(command.preview.width)} × ${dragDimension(command.preview.depth)} × ${kind === "disk" ? "面" : dragDimension(command.preview.height)} mm · R${result.revision}`);
+          setStatus(`拖拽创建完成 · ${dragDimension(command.preview.width)} × ${dragDimension(command.preview.depth)} × ${kind === "disk" ? "面" : dragDimension(command.preview.height)} mm · R${result.revision} · 已返回拾取`);
         } catch (reason) {
           setError(reason instanceof Error ? reason.message : "拖拽建模失败");
           setStatus("拖拽建模未完成");
@@ -2003,8 +2057,7 @@ export default function CadDemo() {
     const onContextMenu = (event: MouseEvent) => {
       event.preventDefault();
       if (dragModelingRef.current && dragStageRef.current !== "idle") {
-        clearDragGhost();
-        setStatus("已取消当前绘制，未创建几何。");
+        exitDragModeling();
         return;
       }
       const pointer = event as PointerEvent;
@@ -2140,7 +2193,7 @@ export default function CadDemo() {
       renderer.forceContextLoss();
       mount.removeChild(renderer.domElement);
     };
-  }, [applyBodySelection, changeSelectionMode, displayModel, findBodyAtPointer, handlePick, selectBodiesInRectangle, renderModel, renderMeshResults, removeMeshGroup,removeQualityGroup,renderQualitySelection,removePreparationGroup,renderPreparationPreview,removePropertyHighlight,renderPropertySelection,viewportEpoch]);
+  }, [applyBodySelection, changeSelectionMode, displayModel, exitDragModeling, findBodyAtPointer, handlePick, selectBodiesInRectangle, renderModel, renderMeshResults, removeMeshGroup,removeQualityGroup,renderQualitySelection,removePreparationGroup,renderPreparationPreview,removePropertyHighlight,renderPropertySelection,viewportEpoch]);
 
   const restoreOrCreateModel = useCallback(async function restoreOrCreateModel() {
     const documentId=modelingController.getSnapshot().documentId;
@@ -2572,59 +2625,104 @@ export default function CadDemo() {
     }
   }, [displayModel]);
 
-  const saveProjectFromMenu = useCallback(async (nameInput?: string) => {
+  const runProjectSwitch = useCallback(async (intent: ProjectSwitch) => {
+    if (!ownsDocumentState(intent) || modelingController.hasPendingMutation()) {
+      setError("工程状态已变化，请重新发起工程切换。");
+      return;
+    }
+    await intent.run();
+  }, []);
+
+  const requestProjectSwitch = useCallback(async (label: string, run: () => Promise<void>) => {
+    if (checkingSwitchRef.current || savingProjectRef.current || modelingController.hasPendingMutation()) return;
+    const { documentId, stateToken } = modelingController.getSnapshot();
+    const intent = { documentId, stateToken, label, run };
+    checkingSwitchRef.current = true;
+    try {
+      const project = await modelingController.getWorkspaceMetadata(documentId);
+      if (project.hasChangesSinceExport && ownsDocumentState(intent)) setProjectSwitch(intent);
+      else await runProjectSwitch(intent);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法确认工程的保存状态。");
+    } finally {
+      checkingSwitchRef.current = false;
+    }
+  }, [runProjectSwitch]);
+
+  const saveProjectFromMenu = useCallback(async (nameInput?: string, copy = false) => {
     if (savingProjectRef.current || modelingController.hasPendingMutation()) return;
     const documentId = modelingController.getSnapshot().documentId;
-    if (nameInput !== undefined && saveNameOwner !== documentId) return;
+    if (nameInput !== undefined && (saveNamePrompt?.documentId !== documentId || saveNamePrompt.copy !== copy)) return;
+    const continuation = copy ? null : switchAfterSave.current;
+    if (continuation && !ownsDocumentState(continuation)) {
+      switchAfterSave.current = null;
+      setSaveNamePrompt(null);
+      setError("工程状态已变化，请重新发起工程切换。");
+      return;
+    }
     savingProjectRef.current = true;
     setBusy(true);
     setError(null);
     let naming = nameInput !== undefined;
+    let waitingForName = false;
+    let saved = false;
     try {
       let project = await modelingController.getWorkspaceMetadata(documentId);
       if (modelingController.getSnapshot().documentId !== documentId) return;
-      if (nameInput === undefined && (!project.name.trim() || project.name.trim() === "未命名工程")) {
-        setSaveName("");
+      if (nameInput === undefined && (copy || !project.name.trim() || project.name.trim() === "未命名工程")) {
+        setSaveName(copy && project.name !== "未命名工程" ? project.name : "");
         setSaveNameError(null);
-        setSaveNameOwner(documentId);
-        setActiveOperation("nameBeforeSave");
+        setSaveNamePrompt({ documentId, copy });
+        waitingForName = true;
         return;
       }
-      if (nameInput !== undefined) {
-        const name = nameInput.trim();
-        if (!name || name === "未命名工程") return;
+      const name = nameInput?.trim() ?? project.name;
+      if (naming) {
+        if (!name || name === "未命名工程" || /[\u0000-\u001f\u007f]/.test(name)) {
+          setSaveNameError("请输入有效的工程名称。");
+          waitingForName = true;
+          return;
+        }
         setSaveNameError(null);
-        project = await modelingController.renameWorkspace(name);
+        if (!copy) project = await modelingController.renameWorkspace(name);
         if (modelingController.getSnapshot().documentId !== documentId) return;
-        workspace.refresh();
-        setActiveOperation(null);
+        if (!copy) workspace.refresh();
+        setSaveNamePrompt(null);
         naming = false;
       }
-      setStatus("正在生成工程备份…");
-      const blob = await modelingController.saveProject();
-      startBackupDownload(blob, workspaceFileName(project.name));
+      setStatus(copy ? "正在生成工程副本…" : "正在生成工程备份…");
+      const blob = await modelingController.saveProject(copy ? name : undefined);
+      startBackupDownload(blob, workspaceFileName(copy ? name : project.name));
       workspace.refresh();
-      setStatus("备份已校验并交给浏览器下载，请确认本地文件保存情况");
+      setStatus(copy ? "工程副本已交给浏览器下载" : "备份已校验并交给浏览器下载，请确认本地文件保存情况");
+      saved = true;
     } catch (reason) {
-      if (naming) { setSaveNameError(reason instanceof Error ? reason.message : "工程命名失败。"); return; }
+      if (naming) {
+        setSaveNameError(reason instanceof Error ? reason.message : "工程命名失败。");
+        waitingForName = true;
+        return;
+      }
       const cancelled=reason instanceof ModelingCommandError&&(reason.modelingTask?.phase==='cancelled'||reason.code==='PROJECT_BACKUP_DOWNLOAD_CANCELLED');
       setError(cancelled?null:reason instanceof Error ? reason.message : "备份生成或下载结果待核对。");
       setStatus(cancelled?reason.code==='PROJECT_BACKUP_DOWNLOAD_CANCELLED'?"已停止下载，后台备份仍保留":"备份生成已取消，工程未修改":reason instanceof ModelingCommandError&&(reason.modelingTask?.phase==='succeeded'||reason.code.startsWith('PROJECT_BACKUP_')||reason.code==='WORKSPACE_TRANSFER_SUPERSEDED')?"备份已生成，未完成下载；可从原任务继续":"保存结果待核对，请检查原任务");
     } finally {
       setBusy(false);
       savingProjectRef.current = false;
+      if (continuation && !waitingForName) switchAfterSave.current = null;
     }
-  }, [saveNameOwner, setActiveOperation, workspace.refresh]);
+    if (saved && continuation) await runProjectSwitch(continuation);
+  }, [runProjectSwitch, saveNamePrompt, startBackupDownload, workspace.refresh]);
 
   const importStepFromMenu = useCallback(async (file: File) => {
     setBusy(true);
     setError(null);
-    setStatus("正在导入 STEP…");
+    setStatus("正在追加 STEP…");
     try {
       const result = await modelingController.importStep(file);
       displayModel(result as ModelData, { replaceScene: true });
       setActiveOperation(null);
-      setStatus(`已导入 ${file.name}`);
+      const added = modelingController.getSnapshot().stepImportStatus?.report?.bodyCount;
+      setStatus(added === undefined ? `已追加 ${file.name}` : `已追加 ${file.name} · ${added} 个 Body`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "STEP 导入失败。");
       const phase=modelingController.getSnapshot().stepImportStatus?.phase;
@@ -2657,7 +2755,7 @@ export default function CadDemo() {
     if (id.startsWith("boolean.")) return { enabled: (model?.bodyCount || 0) >= 2 && !busy, reason: "布尔运算至少需要两个 Body" };
     if (["feature.shell", "feature.thicken", "feature.offsetOnly", "feature.sweep", "feature.pipe", "feature.loft"].includes(id)) return { enabled: Boolean(model?.bodyCount) && !busy, reason: "请先创建几何" };
     if (id === "file.new" || id === "file.open" || id === "file.importStep") return { enabled: !busy, reason: "几何服务正在计算" };
-    if (id === "file.save" || id === "file.exportStep") return { enabled: Boolean(model) && !busy, reason: "请先创建或打开工程" };
+    if (id === "file.save" || id === "file.saveAs" || id === "file.exportStep") return { enabled: Boolean(model) && !busy, reason: "请先创建或打开工程" };
     if (id === "edit.undo") return { enabled: Boolean(controllerState.history?.canUndo??model?.canUndo) && !commandBusy, reason: commandBusy?"当前命令尚未完成":"当前没有可撤销的操作" };
     if (id === "edit.redo") return { enabled: Boolean(controllerState.history?.canRedo??model?.canRedo) && !commandBusy, reason: commandBusy?"当前命令尚未完成":"当前没有可重做的操作" };
     if (id === "edit.properties") return { enabled: Boolean(model), reason: "请先创建或打开工程" };
@@ -2678,7 +2776,7 @@ export default function CadDemo() {
     if (id === "view.screenshot") return { enabled: viewerReady, reason: "三维视口尚未就绪" };
     if (id === "view.panels" || id === "view.restorePanels" || id === "view.messages" || id === "view.measurements") return { enabled: true };
     if (id === "view.shaded" || id === "view.wire" || id === "view.edges") return { enabled: viewerReady, active: id.slice(5) === displayMode };
-    if (id === "window.closeOperation") return { enabled: Boolean(activeOperation), reason: "当前没有打开的操作窗口" };
+    if (id === "window.closeOperation") return { enabled: Boolean(activeOperation) || dragModeling, reason: "当前没有打开的操作" };
     if (id === "select.body") return { enabled: true, active: selectionMode === "body" };
     if (id === "select.face") return { enabled: true, active: selectionMode === "face" };
     if (id === "select.edge") return { enabled: true, active: selectionMode === "edge" };
@@ -2695,8 +2793,11 @@ export default function CadDemo() {
       setDragPrimitive((id.startsWith("surface.") ? `surface-${id.slice(8)}` : id.slice(10)) as GridDragKind);
       setParameterDraft(null);
       parameterInputRef.current = null;
-      if (dragModeling) { cancelDragRef.current(); setActiveOperation(null); }
-      else setActiveOperation(id.startsWith("primitive.") ? "primitives" : "surfaces");
+      if (preferDragModeling) {
+        cancelDragRef.current();
+        setDragModeling(true);
+        setActiveOperation(null);
+      } else setActiveOperation(id.startsWith("primitive.") ? "primitives" : "surfaces");
       return;
     }
     if (id.startsWith("transform.")) { setActiveTool(id); setActiveOperation("transform"); return; }
@@ -2725,12 +2826,13 @@ export default function CadDemo() {
     if (id === "project.propertyTypes") setPropertyTypeId(undefined);
     if (id.startsWith("project.")) setProjectDataCopyId(null);
     if (id === "select.body" || id === "select.face" || id === "select.edge") {
-      changeSelectionMode(id.slice("select.".length) as SelectionMode);
+      selectViewportMode(id.slice("select.".length) as SelectionMode);
       return;
     }
-    if (id === "file.new") { await createNewProject(); return; }
+    if (id === "file.new") { await requestProjectSwitch("新建工程", createNewProject); return; }
     if (id === "file.open") { menuProjectInputRef.current?.click(); return; }
     if (id === "file.save") { await saveProjectFromMenu(); return; }
+    if (id === "file.saveAs") { await saveProjectFromMenu(undefined, true); return; }
     if (id === "file.importStep") { menuStepInputRef.current?.click(); return; }
     if (id === "file.exportStep") { await exportStepFromMenu(); return; }
     if (id === "view.fit") {
@@ -2791,9 +2893,11 @@ export default function CadDemo() {
     if (id === "project.variables") { setProjectDataMode("variables"); setProjectDataItemId(null); }
     if (id === "project.coordinates") { setProjectDataMode("coordinates"); setProjectDataItemId(null); }
     if (id === "project.materials") { setProjectDataMode("materials"); setProjectDataItemId(null); }
-    if (id === "window.closeOperation") setActiveOperation(null);
-    else if (operationByCommand[id as CadCommandId]) setActiveOperation(operationByCommand[id as CadCommandId] || null);
-  }, [dragModeling, changeDisplayMode, changePanel, changeSelectionMode, createNewProject, exportStepFromMenu, frameViewport, moveHistory, restorePanels, saveProjectFromMenu, setActiveOperation, setStandardView, renderAllBodies]);
+    if (id === "window.closeOperation") {
+      if (activeOperation) setActiveOperation(null);
+      else if (dragModeling) exitDragModeling();
+    } else if (operationByCommand[id as CadCommandId]) setActiveOperation(operationByCommand[id as CadCommandId] || null);
+  }, [activeOperation, dragModeling, preferDragModeling, changeDisplayMode, changePanel, changeSelectionMode, createNewProject, exitDragModeling, exportStepFromMenu, frameViewport, moveHistory, requestProjectSwitch, restorePanels, saveProjectFromMenu, selectViewportMode, setActiveOperation, setStandardView, renderAllBodies]);
 
   const openProjectData = (mode: ProjectDataMode, id?: string | null, copy = false) => { setProjectDataMode(mode); setProjectDataItemId(copy ? null : id || null); setProjectDataCopyId(copy ? id || null : null); setActiveOperation("projectData"); };
   const deleteProjectData = async (mode: ProjectDataMode, id: string) => {
@@ -2813,15 +2917,28 @@ export default function CadDemo() {
       else setError(reason instanceof Error ? reason.message : "特征操作失败");
     } finally { setBusy(false); }
   };
+  const confirmFeatureDeletion = (featureId: string, bodyId: string | null | undefined, run: () => Promise<void>) => {
+    const bodyName = model?.bodyMetadata?.find(body => body.bodyId === bodyId)?.name || bodyId;
+    confirmDeletion(`删除特征 ${featureId}`, `${bodyName ? `所属 Body：${bodyName}。` : ""}删除后，下游特征可能重算并需要重新选择几何引用。`, run);
+  };
   const operationContent = () => {
-    if (activeOperation === "nameBeforeSave") return <form className="panel-section" onSubmit={event => { event.preventDefault(); void saveProjectFromMenu(saveName); }}>
-      <label className="single-field"><span>工程名称</span><input autoFocus required maxLength={120} value={saveName} onChange={event => setSaveName(event.target.value)} disabled={busy} /></label>
-      {saveNameError && <p className="property-error" role="alert">{saveNameError}</p>}
-      <div className="exchange-actions"><button type="submit" disabled={busy || saveNameOwner !== controllerState.documentId || !saveName.trim() || saveName.trim() === "未命名工程"}>命名并保存</button><button type="button" disabled={busy} onClick={() => setActiveOperation(null)}>取消</button></div>
-    </form>;
     if(activeOperation==='backups')return <ProjectBackupPanel key={controllerState.documentId} documentId={controllerState.documentId} busy={controllerState.busy}/>;
     if(activeOperation==='sources')return <SourceAuditPanel key={controllerState.documentId+':'+sourcePanelView} documentId={controllerState.documentId} stateToken={model?.stateToken??null} initialView={sourcePanelView} geometry={model} blocked={sourceRecoveryBlocked} onModel={result=>{displayModel(result as ModelData,{fitCamera:false});setStatus('工程引用已核对 · R'+result.revision);}} onHistory={featureId=>{setTreeFeatureRepair(null);setFeatureToEdit(featureId??null);setActiveOperation('history');}}/>;
-    if(activeOperation==="workspace")return <WorkspacePanel key={controllerState.documentId} current={workspace.project} onChanged={workspace.refresh} onRestore={async id=>{setBusy(true);try{const restored=await modelingController.restoreWorkspace<ModelData>(id);displayModel(restored,{replaceScene:true});setError(null);setStatus("已恢复工程 · R"+restored.revision);setActiveOperation(null);}finally{setBusy(false);}}}/>;
+    if(activeOperation==="workspace")return <WorkspacePanel key={controllerState.documentId} current={workspace.project} onChanged={workspace.refresh} onRequestRestore={restore => requestProjectSwitch("恢复工程", restore)} onRestore={async id => {
+      setBusy(true);
+      setError(null);
+      try {
+        const restored = await modelingController.restoreWorkspace<ModelData>(id);
+        displayModel(restored, { replaceScene: true });
+        setStatus(`已恢复工程 · R${restored.revision}`);
+        setActiveOperation(null);
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "恢复工程失败。");
+        throw reason;
+      } finally {
+        setBusy(false);
+      }
+    }}/>;
     if (activeOperation === "projectData" && !model) return <p className="panel-copy">请先新建或打开工程，几何服务就绪后即可管理变量、材料和坐标系。</p>;
     if (activeOperation === "generated") return <GeneratedModelingPanel key={generatedKind} kind={generatedKind} model={model} bodyId={selectedBodyId || model?.bodyId || null} faceId={selectedId?.startsWith("face-") ? selectedId : null} onModel={handleDirectModel} />;
     if (activeOperation === "bodyAppearance") { const body = model?.bodyMetadata?.find((item) => item.bodyId === appearanceBodyId); return body ? <BodyAppearancePanel key={body.bodyId} body={{ ...body, topologyRevision: body.topologyRevision || 0 }} materials={(model?.materials || []).map((item) => item.name)} onSave={(id,changes)=>updateBodyFromTree(id,changes,true)} /> : <p className="panel-copy">该 Body 已不存在。</p>; }
@@ -2968,7 +3085,7 @@ export default function CadDemo() {
           <button className="secondary-action" onClick={() => void applyOffsetFeature()} disabled={busy || (requiresFace && !selectedId?.startsWith("face-"))} data-testid="apply-offset-feature">执行 {offsetFeatureKind === "shell" ? "Shell" : offsetFeatureKind === "thicken" ? "Thicken" : "Offset"}</button>
         </section>
       );
-    }    if (activeOperation === "exchange") return <StepExchangePanel projectSaveBusy={commandBusy} hasModel={Boolean(model)} onImported={(data) => displayModel(data as ModelData, { replaceScene: true })} onImport={(file) => modelingController.importStep(file)} onExport={() => modelingController.exportStep()} onProjectSave={saveProjectFromMenu} onProjectOpen={(file) => modelingController.openProject(file)} />;
+    }    if (activeOperation === "exchange") return <StepExchangePanel projectSaveBusy={commandBusy} hasModel={Boolean(model)} onImported={(data) => displayModel(data as ModelData, { replaceScene: true })} onImport={(file) => modelingController.importStep(file)} onExport={() => modelingController.exportStep()} onProjectSave={() => saveProjectFromMenu()} onProjectOpen={file => requestProjectSwitch("打开工程", () => openProjectFromMenu(file))} />;
     if (activeOperation === "propertyTypes") return <PropertyTypeManagerPanel key={propertyTypeId === undefined ? "manage" : propertyTypeId === null ? "new" : propertyTypeId} initialTypeId={propertyTypeId} />;
     if (activeOperation === "properties") return (
       <>
@@ -2980,7 +3097,7 @@ export default function CadDemo() {
       </>
     );
     if (activeOperation === "projectData" && model) return <AdvancedProjectDataPanel key={`${projectDataMode}:${projectDataItemId ?? "new"}:${projectDataCopyId}`} mode={projectDataMode} initialItemId={projectDataItemId} copyFromId={projectDataCopyId} editorOnly revision={model.revision} variables={model.variables || []} coordinateSystems={model.coordinateSystems || []} selectedBodyId={selectedBodyId ?? model.bodyId} selectedTopologyId={selectedId} materials={model.materials || []} onRevision={handleProjectRevision} />;
-    if (activeOperation === "history") return <FeatureHistoryControls key={`${selectedBodyId ?? model?.bodyId ?? "none"}:${featureToEdit ?? "default"}:${treeRepairEpoch}`} model={model} bodyId={selectedBodyId ?? model?.bodyId ?? null} initialFeatureId={featureToEdit} initialRepair={treeFeatureRepair} onRepairFinished={()=>setTreeFeatureRepair(null)} onModel={handleDirectModel} />;
+    if (activeOperation === "history") return <FeatureHistoryControls key={`${selectedBodyId ?? model?.bodyId ?? "none"}:${featureToEdit ?? "default"}:${treeRepairEpoch}`} model={model} bodyId={selectedBodyId ?? model?.bodyId ?? null} initialFeatureId={featureToEdit} initialRepair={treeFeatureRepair} onRepairFinished={()=>setTreeFeatureRepair(null)} onModel={handleDirectModel} onConfirmDelete={confirmFeatureDeletion} />;
     return (
       <section className="panel-section capability-list">
         <p><strong>基础体</strong><span>Box、Cylinder、Cone、Sphere、Torus、Wedge、Prism、Pyramid、Tube</span></p>
@@ -3023,7 +3140,11 @@ export default function CadDemo() {
       </header>
 
       <CommandChrome availability={commandAvailability} onCommand={(id) => void handleCommand(id)} />
-      <input ref={menuProjectInputRef} type="file" accept=".cadproj,.xbf,application/vnd.webcad.project,application/x-occt-xbf" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void openProjectFromMenu(file); }} />
+      <input ref={menuProjectInputRef} type="file" accept=".cadproj,.xbf,application/vnd.webcad.project,application/x-occt-xbf" hidden onChange={(event) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (file) void requestProjectSwitch("打开工程", () => openProjectFromMenu(file));
+      }} />
       <input ref={menuStepInputRef} type="file" accept=".step,.stp,application/step" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void importStepFromMenu(file); }} />
 
       <section className={"workbench" + (agentOpen ? " with-agent" : "")} data-left-dock={panelVisibility.tree || panelVisibility.properties} data-right-dock={agentOpen || panelVisibility.commands} style={{ "--project-dock-width": projectDockWidth + "px" } as React.CSSProperties}>
@@ -3036,8 +3157,14 @@ export default function CadDemo() {
             onSelectTarget={selectTargetFromProperty} onSelectTargets={targets=>void selectTargetsFromProperty(targets)} onError={setError} query={treeQuery} onQuery={setTreeQuery} onHide={() => changePanel("tree", false)} geometry={
               <FeatureTree query={treeQuery} features={model?.features ?? []} bodies={(model?.bodyMetadata || []).map((body) => ({ ...body, topologyRevision: body.topologyRevision || 0 }))}
               activeBodyId={model?.activeBodyId || model?.bodyId || null} selectedBodyId={selectedBodyId} selectedBodyIds={selectedBodyIds}
-              onSelectBody={selectBodiesFromTree} onActivateBody={activateBodyFromTree} onEditFeature={editFeatureFromTree} onFeatureAction={featureActionFromTree}
-              onDeleteBody={deleteBodyFromTree} deletingBodyId={deletingBodyId} onUpdateBody={updateBodyFromTree}
+              onSelectBody={selectBodiesFromTree} onActivateBody={activateBodyFromTree} onEditFeature={editFeatureFromTree} onFeatureAction={async (id, action, owner) => {
+                if (action === "delete") confirmFeatureDeletion(id, owner, () => featureActionFromTree(id, action, owner));
+                else await featureActionFromTree(id, action, owner);
+              }}
+              onDeleteBody={async id => {
+                const name = model?.bodyMetadata?.find(body => body.bodyId === id)?.name || id;
+                confirmDeletion(`删除 Body ${name}`, "此操作会删除几何体，关联特征和对象属性也可能受影响。", () => deleteBodyFromTree(id));
+              }} deletingBodyId={deletingBodyId} onUpdateBody={updateBodyFromTree}
               onEditBody={(bodyId) => { setAppearanceBodyId(bodyId); setActiveOperation("bodyAppearance"); }}
               onEditMaterial={(name) => openProjectData("materials", name)}
               onManageProperties={(bodyId) => { void selectBodiesFromTree(bodyId); setInstanceTypeId(null); setPropertyInstanceId(undefined); setActiveOperation("properties"); }}
@@ -3077,13 +3204,13 @@ export default function CadDemo() {
               <select className="studio-view-select" aria-label="模型显示模式" value={displayMode} disabled={!viewerReady} onChange={event => changeDisplayMode(event.target.value as ViewportDisplay)}>
                 <option value="edges">着色 + 边线</option><option value="shaded">着色</option><option value="wire">线框</option>
               </select>
-              <div className="viewport-selection-tools" aria-label="选择过滤器">{(["body", "face", "edge"] as const).map((mode) => <button key={mode} aria-pressed={selectionMode === mode} onClick={() => changeSelectionMode(mode)}>{mode === "body" ? "体" : mode === "face" ? "面" : "边"}</button>)}</div>
+              <div className="viewport-selection-tools" aria-label="选择过滤器">{(["body", "face", "edge"] as const).map((mode) => <button key={mode} aria-pressed={selectionMode === mode} onClick={() => selectViewportMode(mode)}>{mode === "body" ? "体" : mode === "face" ? "面" : "边"}</button>)}</div>
               <div className="viewport-selection-tools" aria-label="建模方式">
-                <button type="button" aria-keyshortcuts="Alt+M" title={sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "拖拽建模 · Alt+M 切换"} aria-pressed={dragModeling} disabled={busy || sourceRecoveryBlocked} onClick={() => changeModelingMethod(true)}>拖拽建模</button>
-                <button type="button" aria-keyshortcuts="Alt+M" title={sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "参数建模 · Alt+M 切换；保留已拖拽的尺寸"} aria-pressed={!dragModeling} disabled={busy || sourceRecoveryBlocked} onClick={() => changeModelingMethod(false)}>参数建模</button>
+                <button type="button" aria-keyshortcuts={dragModeling ? "Escape Alt+M" : "Alt+M"} title={dragModeling ? "退出拖拽建模 · Esc" : sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "进入拖拽建模 · Alt+M 切换"} aria-pressed={dragModeling} disabled={!dragModeling && (busy || sourceRecoveryBlocked)} onClick={() => dragModeling ? exitDragModeling() : changeModelingMethod(true)}>拖拽建模</button>
+                <button type="button" aria-keyshortcuts="Alt+M" title={sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "参数建模 · Alt+M 切换；保留已拖拽的尺寸"} aria-pressed={!preferDragModeling} disabled={busy || sourceRecoveryBlocked} onClick={() => changeModelingMethod(false)}>参数建模</button>
               </div>
               {dragModeling && <select className="drag-modeling-kind" aria-label="拖拽建模类型" value={dragPrimitive} disabled={busy || sourceRecoveryBlocked} onChange={(event) => { parameterInputRef.current = null; setParameterDraft(null); setDragPrimitive(event.target.value as GridDragKind); }}>{[["box","长方体"],["cylinder","圆柱体"],["cone","圆锥体"],["sphere","球体"],["torus","圆环体"],["wedge","楔体"],["prism","棱柱"],["pyramid","棱台"],["tube","圆管"],["surface-rectangle","矩形面"],["surface-disk","圆面"],["surface-cylinder","圆柱面"],["surface-cone","圆锥面"],["surface-sphere","球面"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select>}
-              <ConstructionControls coordinates={constructionCoordinates} selectedId={constructionId} frame={constructionInfo.frame} error={constructionInfo.error} step={snapStep} disabled={commandBusy || sourceRecoveryBlocked || Boolean(activeOperation)} onCoordinate={id=>{cancelDragRef.current();parameterInputRef.current=null;setParameterDraft(null);setConstructionSelection({documentId:controllerState.documentId,id});}} onStep={step=>{cancelDragRef.current();setParameterDraft(null);setSnapStep(step);}} onAlign={alignToConstruction}/>
+              <ConstructionControls coordinates={constructionCoordinates} selectedId={constructionId} frame={constructionInfo.frame} error={constructionInfo.error} step={snapStep} geometrySnap={geometrySnap} disabled={commandBusy || sourceRecoveryBlocked || Boolean(activeOperation)} onCoordinate={id=>{cancelDragRef.current();parameterInputRef.current=null;setParameterDraft(null);setConstructionSelection({documentId:controllerState.documentId,id});}} onStep={step=>{cancelDragRef.current();setParameterDraft(null);setSnapStep(step);}} onGeometrySnap={enabled=>{cancelDragRef.current();geometrySnapRef.current=enabled;setGeometrySnap(enabled);}} onAlign={alignToConstruction}/>
             </div>
             <div className="view-tools" aria-label="视口工具">
               <button onClick={() => void handleCommand("view.fit")} aria-label="适应窗口" title="适应窗口"><StudioIcon name="fit" /></button>
@@ -3134,9 +3261,9 @@ export default function CadDemo() {
               <ol className="drag-modeling-steps" aria-label="绘制步骤">{gridDragSteps(dragPrimitive).map((step, index) => <li key={step.stage} aria-current={step.stage === dragStage ? "step" : undefined} data-complete={index < gridDragSteps(dragPrimitive).findIndex(item => item.stage === dragStage)}><span aria-hidden="true">{index + 1}</span>{step.label}</li>)}</ol>
               <div className="drag-dimension-readout" role="status">{gridDragDimensionText(dragPrimitive, dragStage, dragPreview)}</div>
               <span>{gridDragInstruction(dragPrimitive, dragStage)}</span>
-              <div><button type="button" onClick={() => changeModelingMethod(false)} title="Alt+M，保留当前尺寸与位置">参数输入</button>{dragStage === "height" && <button type="button" onClick={() => reselectDragBaseRef.current()} title="Backspace，保留起点，重新绘制底面">重选底面</button>}<button type="button" onClick={() => cancelDragRef.current()} title="Esc，不创建几何">取消绘制</button></div>
+              <div><button type="button" onClick={() => changeModelingMethod(false)} title="Alt+M，保留当前尺寸与位置">参数输入</button>{dragStage === "height" && <button type="button" onClick={() => reselectDragBaseRef.current()} title="Backspace，保留起点，重新绘制底面">重选底面</button>}<button type="button" onClick={exitDragModeling} title="Esc，取消当前绘制并退出拖拽建模">取消绘制</button></div>
             </div>}
-            <div className="viewport-hint">{dragModeling ? `${constructionInfo.error || gridDragInstruction(dragPrimitive, dragStage)} · ${constructionInfo.frame?.name || constructionId} XY · ${snapStep} mm 吸附 · Alt+M 参数输入 · Esc 取消${dragPrimitive === "tube" ? " · 内半径默认外半径的 60%" : dragPrimitive === "prism" ? " · 默认六棱柱" : ["pyramid", "wedge"].includes(dragPrimitive) ? " · 顶部尺寸默认底部的 50%" : ""}` : "左键点选 / 框选 · 中键旋转 · Shift + 拖动平移 · 滚轮缩放"}</div>
+            <div className="viewport-hint">{dragModeling ? `${constructionInfo.error || gridDragInstruction(dragPrimitive, dragStage)} · ${constructionInfo.frame?.name || constructionId} XY · 网格 ${snapStep} mm${geometrySnap ? " · 几何吸附" : ""} · Alt+M 参数输入 · Esc 退出拖拽${dragPrimitive === "tube" ? " · 内半径默认外半径的 60%" : dragPrimitive === "prism" ? " · 默认六棱柱" : ["pyramid", "wedge"].includes(dragPrimitive) ? " · 顶部尺寸默认底部的 50%" : ""}` : "左键点选 / 框选 · 中键旋转 · Shift + 拖动平移 · 滚轮缩放"}</div>
             {contextMenu && <div ref={viewportMenuRef} className="viewport-context-menu" role="menu" aria-label="视口操作" onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
               const { key } = event;
               if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(key)) return;
@@ -3148,7 +3275,7 @@ export default function CadDemo() {
             }}>
               <button type="button" role="menuitem" disabled={commandBusy || !model?.bodyCount} onClick={() => { setContextMenu(null); void renderAllBodies(); }}>全量渲染</button>
               <button type="button" role="menuitem" disabled={!viewerReady || !model?.bodyCount} onClick={() => { setContextMenu(null); void handleCommand("view.fit"); }}>适应窗口</button>
-              <button type="button" role="menuitem" onClick={() => { setContextMenu(null); changeSelectionMode("body"); }}>体选择 / 框选</button>
+              <button type="button" role="menuitem" onClick={() => { setContextMenu(null); selectViewportMode("body"); }}>体选择 / 框选</button>
               {selectedBodyIds.length > 0 && <button type="button" role="menuitem" disabled={commandBusy || sourceRecoveryBlocked} onClick={() => void hideSelectedBodies()}>隐藏所选 Body</button>}
               <button type="button" role="menuitem" onClick={() => { setContextMenu(null); applyBodySelection([]); }}>清除选择</button>
             </div>}
@@ -3167,7 +3294,7 @@ export default function CadDemo() {
               {!messagesExpanded && <span className={error ? "message-summary error" : "message-summary"} title={error ?? status}>{error ?? status}</span>}
               <button type="button" className="studio-close-output" title="隐藏消息面板" aria-label="隐藏消息面板" onClick={() => changePanel("console", false)}><StudioIcon name="close" /></button>
             </div>
-            <div id="workbench-command-log" hidden={!messagesExpanded || outputTab !== "journal"}><CommandJournal key={controllerState.documentId} entries={documentLog} onClear={clearDocumentJournal} onClearTasks={() => modelingController.clearCompletedModelingTasks()} /></div>
+            <div id="workbench-command-log" hidden={!messagesExpanded || outputTab !== "journal"}><CommandJournal key={controllerState.documentId} documentId={controllerState.documentId} active={messagesExpanded && outputTab === "journal"} entries={documentLog} onClear={clearDocumentJournal} onClearTasks={() => modelingController.clearCompletedModelingTasks()} /></div>
             <div id="workbench-messages" className="studio-messages" hidden={!messagesExpanded || outputTab !== "messages"}>
               <table><thead><tr><th scope="col">时间</th><th scope="col">类型</th><th scope="col">描述</th></tr></thead><tbody>
                 <tr><td>—</td><td className={commandError ? "error" : ""}>{commandError ? "失败" : commandBusy ? "处理中" : "信息"}</td><td>{commandError ?? status}{assemblyProgress !== null && <progress aria-label="几何装载进度" value={assemblyProgress} max={100} />}</td></tr>
@@ -3190,6 +3317,45 @@ export default function CadDemo() {
         </aside>
       </section>
 
+      {projectSwitch && <WorkbenchDialog key="project-switch" title="当前工程有未保存的更改" busy={busy} onCancel={() => setProjectSwitch(null)}>
+        <p>继续{projectSwitch.label}前，可以先生成当前工程的备份。</p>
+        <div className="exchange-actions">
+          <button type="button" disabled={busy} onClick={() => {
+            switchAfterSave.current = projectSwitch;
+            setProjectSwitch(null);
+            void saveProjectFromMenu();
+          }}>保存后切换</button>
+          <button type="button" disabled={busy} onClick={() => {
+            setProjectSwitch(null);
+            void runProjectSwitch(projectSwitch);
+          }}>直接切换</button>
+          <button data-initial-focus type="button" disabled={busy} onClick={() => setProjectSwitch(null)}>取消</button>
+        </div>
+      </WorkbenchDialog>}
+      {saveNamePrompt && <WorkbenchDialog key="project-save-name" title={saveNamePrompt.copy ? "另存为" : "保存前命名工程"} busy={busy} onCancel={() => {
+        switchAfterSave.current = null;
+        setSaveNamePrompt(null);
+      }}>
+        <form className="panel-section" onSubmit={event => { event.preventDefault(); void saveProjectFromMenu(saveName, saveNamePrompt.copy); }}>
+          <label className="single-field"><span>工程名称</span><input data-initial-focus required maxLength={120} value={saveName} onChange={event => setSaveName(event.target.value)} disabled={busy} /></label>
+          {saveNameError && <p className="property-error" role="alert">{saveNameError}</p>}
+          <div className="exchange-actions"><button type="submit" disabled={busy || saveNamePrompt.documentId !== controllerState.documentId || !saveName.trim() || saveName.trim() === "未命名工程"}>{saveNamePrompt.copy ? "下载副本" : "命名并保存"}</button><button type="button" disabled={busy} onClick={() => { switchAfterSave.current = null; setSaveNamePrompt(null); }}>取消</button></div>
+        </form>
+      </WorkbenchDialog>}
+      {deleteConfirmation && <WorkbenchDialog key="delete-confirmation" title={deleteConfirmation.title} busy={commandBusy} onCancel={() => setDeleteConfirmation(null)}>
+        <p>{deleteConfirmation.description}</p>
+        <div className="exchange-actions">
+          <button className="feature-delete-confirm" type="button" disabled={commandBusy} onClick={() => {
+            setDeleteConfirmation(null);
+            if (!ownsDocumentState(deleteConfirmation) || modelingController.hasPendingMutation()) {
+              setError("工程状态已变化，请重新选择要删除的对象。");
+              return;
+            }
+            void deleteConfirmation.run();
+          }}>确认删除</button>
+          <button data-initial-focus type="button" onClick={() => setDeleteConfirmation(null)}>取消</button>
+        </div>
+      </WorkbenchDialog>}
       <footer className="status-bar">
         <span className={`ready-state${commandError && !commandBusy ? " failed" : ""}`}><i />{commandBusy ? "处理中" : commandError ? "操作未完成" : model ? "就绪" : "等待模型"}</span><span>选择: {activeSelection ?? "无"}</span>
         <span>几何体 {model?.bodyCount ?? 0}</span><span>面 {model?.stats?.faceCount ?? 0}</span><span>边 {model?.stats?.edgeCount ?? 0}</span><span>单位: mm</span>

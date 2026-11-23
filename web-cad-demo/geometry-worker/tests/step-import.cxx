@@ -229,5 +229,22 @@ int main(int argc,char** argv){
   check("STEP file units are normalized to the explicit millimetre model unit",[&]{
     const auto file=directory/"inch.step";const std::string previous=Interface_Static::CVal("write.step.unit");struct Restore{std::string Value;~Restore(){Interface_Static::SetCVal("write.step.unit",Value.c_str());}} restore{previous};Interface_Static::SetCVal("write.step.unit","INCH");writeStep(file,false);CadDocument document("units");const auto imported=JsonParser(document.ImportStep("import",file.u8string())).Parse();require(imported.At("stepImport").GetString("modelLengthUnit")=="mm","Model units not declared");const auto& first=imported.At("bodyMetadata").AsArray().front();const double width=first.At("bounds").At("max").AsArray()[0].AsNumber()-first.At("bounds").At("min").AsArray()[0].AsNumber();require(std::abs(width-10)<1e-5,"STEP inch conversion changed the real model size");
   });
+  check("append preserves an explicitly non-millimetre legacy XBF when conversion is unavailable", [&]{
+    const auto snapshot = directory / "inch-legacy.xbf";
+    Handle(TDocStd_Document) legacy;
+    app->NewDocument("BinXCAF", legacy);
+    XCAFDoc_DocumentTool::SetLengthUnit(legacy, 0.0254);
+    XCAFDoc_DocumentTool::ShapeTool(legacy->Main())->AddShape(BRepPrimAPI_MakeBox(1, 2, 3).Shape(), false);
+    const auto written = app->SaveAs(legacy, TCollection_ExtendedString(snapshot.u8string().c_str(), true));
+    app->Close(legacy);
+    require(written == PCDM_SS_OK, "Could not prepare the non-millimetre XBF");
+    CadDocument document("legacy-units");
+    document.RestoreSnapshot("open", snapshot.u8string());
+    const auto before = document.Summary("same");
+    bool rejected = false;
+    try { document.ImportStep("append", solids.u8string()); }
+    catch (const CadError& error) { rejected = error.Code() == "STEP_APPEND_UNIT_MISMATCH"; }
+    require(rejected && document.Summary("same") == before, "STEP append silently reinterpreted the legacy length unit");
+  });
   require(app->NbDocuments()==owners,"STEP test leaked application documents");return failures?1:0;
 }

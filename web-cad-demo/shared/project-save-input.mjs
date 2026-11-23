@@ -1,9 +1,11 @@
-const fields=['protocolVersion','operation','documentId','requestId','baseRevision','baseStateToken','baseStateSequence'];
+const fields=['protocolVersion','operation','documentId','requestId','baseRevision','baseStateToken','baseStateSequence','copyName'];
 export function normalizeProjectSaveInput(value){
   if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!fields.includes(key))||value.protocolVersion!==1||value.operation!=='project.save'||typeof value.documentId!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(value.documentId)||typeof value.requestId!=='string'||!/^[A-Za-z0-9._:-]{1,160}$/.test(value.requestId))throw new TypeError('工程保存任务身份无效。');
   for(const key of ['baseRevision','baseStateSequence'])if(value[key]!==undefined&&(!Number.isSafeInteger(value[key])||value[key]<0))throw new TypeError('工程保存基线版本无效。');
   if(value.baseStateToken!==undefined&&(typeof value.baseStateToken!=='string'||!/^[a-f0-9]{64}$/.test(value.baseStateToken)))throw new TypeError('工程保存基线标识无效。');
-  return {protocolVersion:1,operation:'project.save',documentId:value.documentId,requestId:value.requestId,...(value.baseRevision===undefined?{}:{baseRevision:value.baseRevision}),...(value.baseStateToken===undefined?{}:{baseStateToken:value.baseStateToken}),...(value.baseStateSequence===undefined?{}:{baseStateSequence:value.baseStateSequence})};
+  const {copyName}=value;
+  if(copyName!==undefined&&(typeof copyName!=='string'||!copyName.trim()||copyName.trim()==='未命名工程'||copyName.length>120||/[\x00-\x1f\x7f]/.test(copyName)))throw new TypeError('副本名称须为 1 至 120 个字符，不能包含控制字符。');
+  return {protocolVersion:1,operation:'project.save',documentId:value.documentId,requestId:value.requestId,...(value.baseRevision===undefined?{}:{baseRevision:value.baseRevision}),...(value.baseStateToken===undefined?{}:{baseStateToken:value.baseStateToken}),...(value.baseStateSequence===undefined?{}:{baseStateSequence:value.baseStateSequence}),...(copyName===undefined?{}:{copyName:copyName.trim()})};
 }
 export function projectSaveCanonical(value){return JSON.stringify(normalizeProjectSaveInput(value));}
 export function normalizeProjectSaveTask(value,task,expectedInput){

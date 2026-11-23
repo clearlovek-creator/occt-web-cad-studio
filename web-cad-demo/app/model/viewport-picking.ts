@@ -17,9 +17,14 @@ export function pickViewportBody(ray:THREE.Raycaster,meshes:THREE.Mesh[],camera:
   const visible=meshes.filter(mesh=>mesh.visible);visible.forEach(mesh=>mesh.updateWorldMatrix(true,false));
   return ray.intersectObjects(visible,false).find(hit=>inClip(hit.point,camera));
 }
+export function opaqueViewportBodies(meshes:THREE.Mesh[]){
+  return meshes.filter(mesh=>{
+    const materials=Array.isArray(mesh.material)?mesh.material:[mesh.material];
+    return mesh.visible&&materials.every(material=>material.visible&&material.opacity>=.999);
+  });
+}
 export function pickViewportEdge(ray:THREE.Raycaster,lines:THREE.Line[],meshes:THREE.Mesh[],camera:THREE.Camera){
   const visible=lines.filter(line=>line.visible);visible.forEach(line=>line.updateWorldMatrix(true,false));
-  const opaque=meshes.filter(mesh=>{const materials=Array.isArray(mesh.material)?mesh.material:[mesh.material];return materials.every(material=>material.visible&&material.opacity>=.999);});
-  const occluder=pickViewportBody(ray,opaque,camera),tolerance=ray.params.Line.threshold*1.2;
+  const occluder=pickViewportBody(ray,opaqueViewportBodies(meshes),camera),tolerance=ray.params.Line.threshold*1.2;
   return ray.intersectObjects(visible,false).find(hit=>inClip(hit.point,camera)&&(!occluder||hit.distance<=occluder.distance+tolerance));
 }

@@ -24,7 +24,7 @@ async function open(id) {
   await page.getByTestId('feature-tree').locator('[data-body-id]').first().waitFor();
 }
 async function inspectCanvas(kind,index) {
-  const canvas=page.getByTestId('feature-input-canvas');await canvas.waitFor();
+  const canvas=page.getByTestId('feature-input-canvas');await canvas.scrollIntoViewIfNeeded();
   const point=await canvas.evaluate((node,{kind,index})=>{node.dispatchEvent(new Event('cad:verify-feature-input'));return JSON.parse(node.dataset[kind==='face'?'faceScreenPoints':'edgeScreenPoints']).find(item=>item.index===index);},{kind,index});
   assert.ok(point,`No projected ${kind} ${index}`);const bounds=await canvas.boundingBox();
   await page.mouse.click(bounds.x+point.x,bounds.y+point.y);
@@ -152,10 +152,11 @@ async function undoUsingRibbon(){await page.getByRole('button',{name:'关闭操�
       const id=entry+'_'+action+'_ui',f=await holeFixture(id);if(action==='restore'){await cad(id,'feature.suppress',{}, {featureId:f.feature});await cad(id,'feature.suppress',{}, {featureId:f.cut});}
       const featureId=action==='restore'?f.feature:f.cut,type=action==='restore'?'detail.fillet':'boolean.cut',before=await cad(id,'document.view');await open(id);
       if(entry==='history'){
-        const editor=await editFeature(type,featureId);await editor.getByRole('button',{name:action==='suppress'?'抑制 Feature':action==='restore'?'恢复 Feature':'删除 Feature',exact:true}).click();if(action==='delete')await editor.getByRole('button',{name:'确认删除',exact:true}).click();
+        const editor=await editFeature(type,featureId);await editor.getByRole('button',{name:action==='suppress'?'抑制 Feature':action==='restore'?'恢复 Feature':'删除 Feature',exact:true}).click();
       }else{
         const label=page.getByTestId('feature-tree').locator(`button.feature-tree-label[title^="${type} · ${featureId} ·"]`).first();await label.click({button:'right'});await page.getByRole('menuitem',{name:action==='suppress'?'抑制特征':action==='restore'?'恢复特征':'删除特征',exact:true}).click();
       }
+      if(action==='delete')await page.getByRole('dialog',{name:/^删除特征/}).getByRole('button',{name:'确认删除',exact:true}).click();
       const repair=page.getByTestId('feature-reference-repair');await repair.getByTestId('feature-input-canvas').waitFor();assert.equal((await cad(id,'document.view')).stateToken,before.stateToken);
       await selectOuterInput(id,f.feature,{operation:'feature.'+action,inputs:{featureId},parameters:{}});await repair.getByRole('button',{name:'使用此引用并验证重算',exact:true}).click();await repair.getByText('重算预览通过 · 尚未提交',{exact:true}).waitFor();
       await repair.getByRole('button',{name:'提交参数与引用修复',exact:true}).click();await page.getByTestId('feature-history-controls').getByText(/参数与引用已一起提交/).waitFor();

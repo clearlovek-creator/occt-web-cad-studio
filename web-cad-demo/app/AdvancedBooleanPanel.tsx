@@ -6,7 +6,6 @@ import type { DirectModelResult } from "./DirectModelingPanel";
 type BooleanOperation = "fuse" | "cut" | "common" | "section" | "split" | "partition" | "fragments" | "imprint";
 type BodySummary = { id: string; sourceFeatureId: string; topologyRevision: number; name?: string };
 type Summary = { ok: true; revision: number; bodies: BodySummary[]; bodyMetadata?: { bodyId: string; name: string }[]; error?: string };
-import type { ModelingCommandInput } from "./modeling/command-contract";
 import {useEditorCommands} from "./modeling/CommandEditScope";
 
 
@@ -23,6 +22,7 @@ export function AdvancedBooleanPanel({ model, onModel, initialOperation = "cut" 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const initializedRoles = useRef(false);
+  const imprint = operation === "imprint";
 
   useEffect(() => {
     if (!model) return;
@@ -56,7 +56,7 @@ export function AdvancedBooleanPanel({ model, onModel, initialOperation = "cut" 
     if (!model || !ready) return;
     setBusy(true); setMessage(null);
     try {
-      const result = await command<DirectModelResult & { error?: string }>({ operation: `boolean.${operation}`, baseRevision: model.revision, inputs: { targetBodies: targets, toolBodies: tools }, parameters: { keepTarget, keepTool, refine, splitResults } });
+      const result = await command<DirectModelResult & { error?: string }>({ operation: `boolean.${operation}`, baseRevision: model.revision, inputs: { targetBodies: targets, toolBodies: tools }, parameters: { keepTarget, keepTool: imprint || keepTool, refine, splitResults } });
       setTargets(result.bodyId?[result.bodyId]:[]);setTools([]);onModel(result); setMessage(`Boolean ${operation} 完成，文档版本 R${result.revision}`);
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : "Boolean 操作失败。"); }
     finally { setBusy(false); }
@@ -70,7 +70,7 @@ export function AdvancedBooleanPanel({ model, onModel, initialOperation = "cut" 
     <p className="boolean-role-hint">{operation === "cut" ? "从目标中减去工具；勾选另一列可直接切换对象角色。" : "选择参与运算的目标和工具；勾选另一列可直接切换对象角色。"}</p>
     {missing.length>0 && <p className="property-error" role="alert">输入对象已不存在：{missing.join(", ")}。原角色选择已保留，请重新载入并选择输入，不会自动换成其他 Body。</p>}
     <div className="body-role-grid"><div><strong>目标 Target（可多选）</strong>{bodies.map((body) => <label className="body-role" key={`target-${body.id}`}><input type="checkbox" checked={targets.includes(body.id)} onChange={() => toggle(body.id, "target")} /><span>{body.name}<small>{body.id} · {body.sourceFeatureId}</small></span></label>)}</div><div><strong>工具 Tool（可多选）</strong>{bodies.map((body) => <label className="body-role" key={`tool-${body.id}`}><input type="checkbox" checked={tools.includes(body.id)} onChange={() => toggle(body.id, "tool")} /><span>{body.name}<small>{body.id} · {body.sourceFeatureId}</small></span></label>)}</div></div>
-    <div className="boolean-options"><label className="check-field"><input type="checkbox" checked={keepTarget} onChange={(event) => setKeepTarget(event.target.checked)} /><span>保留 Target</span></label><label className="check-field"><input type="checkbox" checked={keepTool} onChange={(event) => setKeepTool(event.target.checked)} /><span>保留 Tool</span></label><label className="check-field"><input type="checkbox" checked={refine} onChange={(event) => setRefine(event.target.checked)} /><span>Refine 同域合并</span></label><label className="check-field"><input type="checkbox" checked={splitResults} onChange={(event) => setSplitResults(event.target.checked)} /><span>结果拆分为多个 Body</span></label></div>
+    <div className="boolean-options"><label className="check-field"><input type="checkbox" checked={keepTarget} onChange={(event) => setKeepTarget(event.target.checked)} /><span>保留 Target</span></label><label className="check-field"><input type="checkbox" checked={imprint || keepTool} disabled={imprint} onChange={(event) => setKeepTool(event.target.checked)} /><span>保留 Tool{imprint && "（压印固定保留）"}</span></label><label className="check-field"><input type="checkbox" checked={refine} onChange={(event) => setRefine(event.target.checked)} /><span>Refine 同域合并</span></label><label className="check-field"><input type="checkbox" checked={splitResults} onChange={(event) => setSplitResults(event.target.checked)} /><span>结果拆分为多个 Body</span></label></div>
     <button className="secondary-action" disabled={busy || !ready} onClick={() => void execute()}>执行 Boolean {operation}</button>
     {bodies.length < 2 ? <p className="panel-copy">至少创建两个 Body 后才能执行布尔或分割。</p> : !ready && <p className="panel-copy">请至少选择一个目标和一个工具。</p>}
     {message && <p className="exchange-message" role="status">{message}</p>}

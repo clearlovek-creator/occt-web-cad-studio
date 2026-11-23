@@ -544,7 +544,8 @@ void CadDocument::rebuildFromDocument()
   // Their XBF still contains the original compound and one body metadata row.
   for (FeatureNode& feature : myFeatures)
   {
-    if (feature.Type != "import.step" || feature.OutputBodies.size() != 1) continue;
+    if (myFeatures.size() != 1 || myBodies.size() != 1 || feature.Type != "import.step"
+        || feature.NumberParameters.count("decompositionVersion") || feature.OutputBodies.size() != 1) continue;
     const auto existing = myBodies.find(feature.OutputBodies.front());
     if (existing == myBodies.end()) continue;
     const BodyRecord prototype = existing->second;
@@ -579,21 +580,54 @@ void CadDocument::rebuildFromDocument()
   persistMetadata();
 }
 
-std::string CadDocument::RestoreSnapshot(const std::string& requestId, const std::string& path,
-                                        const JsonValue& sourceBindings)
+void CadDocument::loadSnapshot(std::istream& input)
 {
-  std::ifstream input(std::filesystem::u8path(path),std::ios::binary);
-  if(!input)throw CadError("SNAPSHOT_OPEN_FAILED","Could not read the XBF document snapshot.");
-  CadDocument staged(myDocumentId);
   FailedOpenCleanup cleanup;
   Handle(TDocStd_Document) loaded;
   // A stream load creates an independent document even when the same file is
   // already registered in this OCCT application. Never close a live owner first.
   if (application()->Open(input, loaded) != PCDM_RS_OK || loaded.IsNull())
     throw CadError("SNAPSHOT_OPEN_FAILED", "Could not open the XBF document snapshot.");
-  closeRegisteredDocument(staged.myDocument);
-  staged.myDocument = loaded;
-  staged.rebuildFromDocument();
+  closeRegisteredDocument(myDocument);
+  myDocument = loaded;
+  rebuildFromDocument();
+  cleanup.Committed=true;
+}
+
+std::string CadDocument::ImportStep(const std::string& requestId, const std::string& path,
+                                    const std::string& currentCheckpoint)
+{
+  CadDocument staged(myDocumentId);
+  if (!currentCheckpoint.empty())
+  {
+    std::ifstream input(std::filesystem::u8path(currentCheckpoint), std::ios::binary);
+    if (!input) throw CadError("SNAPSHOT_OPEN_FAILED", "Could not read the STEP append checkpoint.");
+    staged.loadSnapshot(input);
+  }
+  else
+  {
+    // Direct callers do not have the Worker's transaction checkpoint.
+    persistMetadata();
+    std::stringstream snapshot(std::ios::in | std::ios::out | std::ios::binary);
+    if (application()->SaveAs(myDocument, snapshot) != PCDM_SS_OK)
+      throw CadError("SNAPSHOT_SAVE_FAILED", "Could not stage the project for STEP append.");
+    snapshot.seekg(0);
+    staged.loadSnapshot(snapshot);
+  }
+  staged.myNextBody = myNextBody;
+  staged.myNextFeature = myNextFeature;
+  const std::string response = staged.importStepStaged(requestId, path);
+  swapState(staged);
+  return response;
+}
+
+std::string CadDocument::RestoreSnapshot(const std::string& requestId, const std::string& path,
+                                        const JsonValue& sourceBindings)
+{
+  std::ifstream input(std::filesystem::u8path(path),std::ios::binary);
+  if(!input)throw CadError("SNAPSHOT_OPEN_FAILED","Could not read the XBF document snapshot.");
+  CadDocument staged(myDocumentId);
+  staged.loadSnapshot(input);
   int bound = 0;
   if (!sourceBindings.IsNull())
   {
@@ -623,7 +657,6 @@ std::string CadDocument::RestoreSnapshot(const std::string& requestId, const std
   summary.pop_back();
   summary += ",\"sourceBindingsApplied\":" + std::to_string(bound) + "}";
   swapState(staged);
-  cleanup.Committed=true;
   return summary;
 }
 }

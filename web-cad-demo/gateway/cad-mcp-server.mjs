@@ -5,6 +5,7 @@ import {loftSectionsSchema,loftDefinitionSchema,validateLoftSections,validateLof
 import {loftHoleLimits} from './worker-capabilities.mjs';
 import {serveBoundedMcp} from './bounded-mcp-stdio.mjs';
 import {executeMcpModelingTask} from './cad-mcp-modeling-task.mjs';
+import {PI_BATCH_OPERATIONS, requiresPiWriteApproval} from './pi-write-approval.mjs';
 import {MESH_STRATEGY_OPTIONS_SCHEMA} from '../shared/mesh-strategy.mjs';
 import {MESH_MCP_TOOLS,callMeshMcpTool} from './cad-mcp-mesh-tasks.mjs';
 
@@ -63,7 +64,8 @@ const REQUIRED_FIELDS = {
 
 function operationInputSchema(operation, nativeCapabilities) {
   const required = REQUIRED_FIELDS[operation] || {};
-  const optional = OPTIONAL_FIELDS[operation] || {};
+  const isBoolean=operation.startsWith('boolean.');
+  const optional = isBoolean ? {inputs:['targetBodies','toolBodies'],parameters:['keepTarget','keepTool','refine','splitResults']} : OPTIONAL_FIELDS[operation] || {};
   const parameterFields = [...new Set([...(required.parameters || []), ...(optional.parameters || [])])];
   const inputFields = [...new Set([...(required.inputs || []), ...(optional.inputs || [])])];
   const parameterProperties = Object.fromEntries(parameterFields.map((field) => [field,
@@ -82,7 +84,7 @@ function operationInputSchema(operation, nativeCapabilities) {
       : field==="reverse" ? {type:"boolean"}
       : field==="loftDefinition" ? loftDefinitionSchema(nativeCapabilities)
       : field==="sweepDefinition" ? {type:"object",additionalProperties:true}
-      : field==="ruled" ? {type:"boolean"}
+      : ['ruled','keepTarget','keepTool','refine','splitResults'].includes(field) ? {type:"boolean"}
       : field==="kind" && operation==="coordinate.set" ? {type:"string",enum:["cartesian","threePoint","face"]}
       : field === "fields" || field === "target" || field === "value" ? {} : field === "inward" || field === "preserveReference" ? { type: "boolean" }
       : field === "mode" ? { type: "string", enum: ["min", "center", "max"] }
@@ -91,10 +93,12 @@ function operationInputSchema(operation, nativeCapabilities) {
   const inputProperties = Object.fromEntries(inputFields.map((field) => [field,
     field === "sections" ? loftSectionsSchema(nativeCapabilities)
       : field === "pathEdgeIds" ? {type:"array",minItems:1,maxItems:32,uniqueItems:true,items:{type:"string",pattern:"^edge-[0-9]+-[1-9][0-9]*$"}}
+      : isBoolean && ['targetBodies','toolBodies'].includes(field) ? {type:'array',minItems:1,maxItems:32,uniqueItems:true,items:{type:'string'}}
       : field === "selectionType" ? { type: "string", enum: ["body", "face", "edge"] } : { type: "string" },
   ]));
   const properties = {
-    inputs: { type: "object", properties: inputProperties, ...(required.inputs?.length ? { required: required.inputs } : {}), additionalProperties: true },
+    inputs: { type: "object", properties: inputProperties, ...(required.inputs?.length && !isBoolean ? { required: required.inputs } : {}), additionalProperties: true,
+      ...(isBoolean ? {allOf:[{anyOf:[{required:['targetBody']},{required:['targetBodies']}]},{anyOf:[{required:['toolBody']},{required:['toolBodies']}]}]} : {}) },
     parameters: { type: "object", properties: parameterProperties, ...(required.parameters?.length ? { required: required.parameters } : {}), additionalProperties: true },
   };
   const rootRequired = [];
@@ -136,17 +140,33 @@ const toolByName = new Map([[queryTool.name, queryTool], ...commandTools.map((to
 for(const tool of commandTools)if(tool.operation.startsWith('property.'))tool.description+=' Types default to single target. Create targetMode=multiple for an explicit homogeneous Body/Face/Edge collection; choose immutable splitPolicy=review or all-descendants (Face/Edge only). Collection instances use parameters.targets (0-256 observed members), never target; value-only edits omit geometry to preserve stored anchors. Query property-types/properties to inspect the current type and association status before editing.';
 for(const tool of commandTools)if(["detail.sweep","detail.pipe"].includes(tool.operation))tool.description+=" Either supply legacy pathX/pathY/pathZ, or observed pathBodyId with 1-32 ordered pathEdgeIds. Model paths use actual OCCT curves, require connected G1 tangency, and retain historical source identities. placement=actual requires the profile at the path start normal plane; placement=align-start explicitly moves/rotates a profile copy, not the source. frame is corrected-frenet or frenet; reverse flips the complete route. Planar profile holes are retained; sharp corners and singular/self-overlapping torus sections are rejected. Existing curved features are edited with feature.update parameters.sweepDefinition, omitting profile/path to retain their references.";
 
-export function listCadMcpTools({nativeCapabilities}={}) {
+const batchTool = {
+  name:'batch_modify', annotations:{readOnlyHint:false},
+  description:'Modify 2-16 existing Body operations atomically. The workbench displays the affected Bodies and waits for explicit approval. Choose all Body IDs from the same query_model snapshot.',
+  inputSchema:{type:'object',additionalProperties:false,required:['baseStateToken','steps'],properties:{
+    baseStateToken:{type:'string',pattern:'^[a-f0-9]{64}$'},baseRevision:{type:'integer',minimum:0},
+    steps:{type:'array',minItems:2,maxItems:16,items:{type:'object',additionalProperties:false,required:['operation','inputs'],properties:{
+      operation:{type:'string',enum:PI_BATCH_OPERATIONS},inputs:{type:'object'},parameters:{type:'object'},
+    }}},
+  }},
+};
+
+export function listCadMcpTools({nativeCapabilities, embeddedPi=false}={}) {
   const holes=loftHoleLimits(nativeCapabilities);
   return [queryTool, ...commandTools,...MESH_MCP_TOOLS].map(({ name, description, inputSchema, operation, readOnly }) => ({ name,
     annotations:{readOnlyHint:name==='query_model'||Boolean(readOnly)},
     description:holes&&operation==='detail.loft'?description.replace('each with one closed boundary; holes and curved Faces are rejected','each with one outer boundary and optionally 1-16 explicitly corresponding inner loops; curved Faces are rejected')+' Through-hole capability is negotiated from the actual native process. Read geometry__measure with selectionType=face for boundaryLoops; map ALL inner loops exactly once with sections[].holeEdgeIds in consistent channel order across sections. Never guess nearest loops or drop holes to bypass a failure.':description+(operation==='feature.update'?' Edit an existing Loft with parameters.loftDefinition; retained {sectionId} entries preserve stored references. Query the feature first, keep its version and never replace opaque selectors.':holes&&operation==='geometry.measure'?' Face results include bounded boundaryLoops: exact displayed Edge membership, role, closure, validity, planarity and completeness; incomplete evidence is not a usable mapping.':''),
-    inputSchema:['detail.loft','feature.update'].includes(operation)?operationInputSchema(operation,nativeCapabilities):inputSchema }));
+    inputSchema:['detail.loft','feature.update'].includes(operation)?operationInputSchema(operation,nativeCapabilities):inputSchema })).concat(embeddedPi?[batchTool]:[]);
 }
 
-export function createCadMcpHandler({ apiRoot = process.env.CAD_GEOMETRY_API_URL || "http://127.0.0.1:8788/api", documentId = process.env.CAD_DOCUMENT_ID || "default", mode = process.env.CAD_AGENT_MODE || "edit", fetchImpl = fetch } = {}) {
+export function createCadMcpHandler({ apiRoot = process.env.CAD_GEOMETRY_API_URL || "http://127.0.0.1:8788/api", documentId = process.env.CAD_DOCUMENT_ID || "default", mode = process.env.CAD_AGENT_MODE || "edit", piSessionId = process.env.CAD_PI_SESSION_ID, piToolToken = process.env.CAD_PI_TOOL_TOKEN, fetchImpl = fetch } = {}) {
   const root = apiRoot.replace(/\/+$/, "");
   const activeMode = mode === "plan" ? "plan" : "edit";
+  if (Boolean(piSessionId) !== Boolean(piToolToken)) throw new Error('Incomplete embedded Pi CAD session binding');
+  const piHeaders = piSessionId ? {'X-Cad-Pi-Session':piSessionId,'X-Cad-Pi-Token':piToolToken} : undefined;
+  const write = async (command, signal) => remember(await executeMcpModelingTask({
+    root,command,fetchImpl,signal,piHeaders,approvalRequired:Boolean(piHeaders)&&requiresPiWriteApproval(command),
+  }));
   const revisions=new Map();
   const remember=result=>{if(typeof result?.stateToken==='string'&&/^[a-f0-9]{64}$/.test(result.stateToken)&&Number.isInteger(result.revision)&&result.revision>=0){revisions.set(result.stateToken,result.revision);while(revisions.size>16)revisions.delete(revisions.keys().next().value);}return result;};
   const queryCad=async args=>{
@@ -156,6 +176,14 @@ export function createCadMcpHandler({ apiRoot = process.env.CAD_GEOMETRY_API_URL
 
   async function callCadTool(name, args, signal) {
     if(signal?.aborted)throw Object.assign(new Error('工具调用已取消，未发送几何命令。'),{code:'MCP_CANCELLED_BEFORE_SEND',outcome:'not-started'});
+    if (name === 'batch_modify' && piHeaders && activeMode === 'edit') {
+      if (!Array.isArray(args.steps) || args.steps.length < 2 || args.steps.length > 16 ||
+          !/^[a-f0-9]{64}$/.test(args.baseStateToken || '') ||
+          args.steps.some(step => !step || !PI_BATCH_OPERATIONS.includes(step.operation)))
+        throw Object.assign(new Error('请从同一工程快照选择对象，并提供 2 到 16 条 Body 操作。'),{code:'PI_BATCH_ARGUMENTS',outcome:'not-started'});
+      return write({protocolVersion:1,documentId,operation:'project.batch',baseStateToken:args.baseStateToken,baseRevision:args.baseRevision,
+        steps:args.steps.map(({operation,inputs,parameters})=>({operation,inputs,parameters}))},signal);
+    }
     const tool = toolByName.get(name);
     if (!tool) throw new Error(`Unknown CAD MCP tool: ${name}`);
     if (name === "query_model") {
@@ -207,7 +235,7 @@ export function createCadMcpHandler({ apiRoot = process.env.CAD_GEOMETRY_API_URL
         ...(args?.baseStateToken !== undefined ? { baseStateToken: args.baseStateToken } : {}),
         ...(workerCapabilityPrecondition?{workerCapabilityPrecondition}:{}),
     };
-    if(!tool.readOnly)return remember(await executeMcpModelingTask({root,command,fetchImpl,signal}));
+    if(!tool.readOnly)return write(command,signal);
     const response = await fetchImpl(`${root}/commands`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -234,7 +262,7 @@ export function createCadMcpHandler({ apiRoot = process.env.CAD_GEOMETRY_API_URL
     try {
       if (method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "web-cad-current-session", version: "1.0.0" } } };
       if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
-      if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: listCadMcpTools({nativeCapabilities:await readMcpNativeCapabilities(root,fetchImpl)}) } };
+      if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: listCadMcpTools({nativeCapabilities:await readMcpNativeCapabilities(root,fetchImpl),embeddedPi:Boolean(piHeaders)}) } };
       if (method === "tools/call") {
         const name = params.name;
         const result = await callCadTool(name, params.arguments || {}, signal);
