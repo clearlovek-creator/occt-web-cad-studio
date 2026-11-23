@@ -69,6 +69,7 @@ import {ProjectMeshService,isProjectMeshRoute} from "./project-mesh-service.mjs"
 import {ProjectMeshAssets} from './project-mesh-assets.mjs';
 import {streamCheckedMesh} from './mesh-download.mjs';
 import { PiRpcRuntime, PiSessionError, normalizePiSessionId } from "./pi-rpc-runtime.mjs";
+import { movePiConversation, ownedPiConversations, ownedPiResumeFile, piConversationId } from './pi-resume-file.mjs';
 import {attachPiEventStream} from './pi-event-stream.mjs';
 import { buildPiProviderConfig } from "./pi-provider-config.mjs";
 import { ProjectFileService } from "./project-file-service.mjs";
@@ -200,7 +201,71 @@ function preparePiSessionConfig(sessionId,projectId) {
   // belong to this CAD project's persistent workspace, never the release tree.
   const projectCwd=bundledPi&&!process.env.PI_CLI_CWD?path.join(dataDir,'pi-workspaces',projectId):null;
   if(projectCwd)fs.mkdirSync(projectCwd,{recursive:true});
-  return { agentConfigDir: directory, env: environment,...(projectCwd?{cwd:projectCwd}:{}) };
+  const skillDirectory=path.join(dataDir,'pi-skills',projectId);
+  fs.mkdirSync(skillDirectory,{recursive:true});
+  return { agentConfigDir: directory, env: environment, skillDirectory,...(projectCwd?{cwd:projectCwd}:{}) };
+}
+
+async function piConversationCommand(session, command){
+  if(command.type==='list_conversations'){
+    const state=await session.request({type:'get_state'});
+    const active=typeof state.data?.sessionFile==='string'?piConversationId(state.data.sessionFile):null;
+    const conversations=await ownedPiConversations(session.sessionRoot,{preview:true,includeDeleted:true});
+    return {...state,command:command.type,data:{conversations:conversations.map(({id,title,updatedAt,deleted})=>({id,title,updatedAt,deleted,active:!deleted&&id===active}))}};
+  }
+  return piRuntime.withDocumentQuiescent(session.documentId,async (_activity,owner)=>{
+    if(command.type==='delete_conversation'||command.type==='restore_conversation'){
+      const deleting=command.type==='delete_conversation';
+      const {conversationId}=command;
+      if(typeof conversationId!=='string'||!/^[a-f0-9]{64}$/.test(conversationId))throw new PiSessionError('INVALID_ARGUMENT','请选择一条有效的历史对话。');
+      const state=await session.request({type:'get_state'});
+      const conversations=await ownedPiConversations(session.sessionRoot,{includeDeleted:true});
+      const target=conversations.find(item=>item.id===conversationId&&item.deleted!==deleting);
+      if(!target){
+        if(conversations.some(item=>item.id===conversationId&&item.deleted===deleting))return {...state,command:command.type,data:{deleted:deleting}};
+        throw new PiSessionError('PI_SESSION_HISTORY_UNAVAILABLE','该对话已不在当前工程的历史中，请刷新列表。');
+      }
+      if(deleting&&state.data?.sessionFile&&piConversationId(state.data.sessionFile)===conversationId){
+        const result=await session.request({type:'new_session'},undefined,{guardOwner:owner});
+        if(result.data?.cancelled)throw new PiSessionError('PI_SESSION_SWITCH_CANCELLED','Pi 取消了新会话，原对话未删除。');
+        piWriteApprovals.revoke(session);
+        await session.selectConversation(null);
+      }
+      movePiConversation(session.sessionRoot,target,deleting);
+      const latest=await session.request({type:'get_state'});
+      return {...latest,command:command.type,data:{deleted:deleting}};
+    }
+    const switchHistory=command.type==='resume_conversation'||command.type==='switch_session';
+    let file;
+    if(switchHistory){
+      const historyId=command.type==='resume_conversation'?command.conversationId:typeof command.sessionPath==='string'?piConversationId(command.sessionPath):null;
+      if(typeof historyId!=='string'||!/^[a-f0-9]{64}$/.test(historyId))throw new PiSessionError('INVALID_ARGUMENT','请选择一条有效的历史对话。');
+      try{file=await ownedPiResumeFile(session.sessionRoot,historyId);}catch(error){throw new PiSessionError('PI_SESSION_HISTORY_UNAVAILABLE',error.message);}
+      if(command.type==='switch_session'&&path.resolve(command.sessionPath)!==file)throw new PiSessionError('INVALID_ARGUMENT','历史路径必须属于当前 Pi 会话。');
+    }
+    piWriteApprovals.revoke(session);
+    const result=await session.request(file?{type:'switch_session',sessionPath:file}:command,undefined,{guardOwner:owner});
+    if(result.data?.cancelled)throw new PiSessionError('PI_SESSION_SWITCH_CANCELLED','Pi 取消了会话切换。');
+    await session.selectConversation(file);
+    return {...result,command:command.type};
+  });
+}
+
+async function reloadPiConfiguration(session, providerId){
+  const provider=providerId===undefined?null:providerStore.get(providerId);
+  if(providerId!==undefined&&(!provider||!provider.enabled))throw new PiSessionError('PROVIDER_NOT_FOUND','请选择一个已启用的大模型配置。');
+  return piRuntime.withDocumentQuiescent(session.documentId,async (_activity,owner)=>{
+    const state=(await session.request({type:'get_state'})).data;
+    const file=typeof state?.sessionFile==='string'&&path.dirname(state.sessionFile)===session.sessionRoot&&fs.existsSync(state.sessionFile)?state.sessionFile:null;
+    if(file)await ownedPiResumeFile(session.sessionRoot,piConversationId(file));
+    const config=preparePiSessionConfig(session.sessionId,session.documentId);
+    piWriteApprovals.revoke(session);
+    await session.stop();
+    session.env={...piRuntime.options.env,...config.env};
+    session.skillDirectory=config.skillDirectory;
+    await session.start({resume:Boolean(file),...(file?{conversationId:piConversationId(file)}:{})});
+    if(provider)await session.request({type:'set_model',provider:provider.id,modelId:provider.model},undefined,{guardOwner:owner});
+  });
 }
 
 let worker;
@@ -232,6 +297,9 @@ const historyStore = new PersistentHistoryStore(dataDir, {
   onWarning: (message) => process.stderr.write(`${message}\n`),
 });
 const workspaces = new WorkspaceCatalog({dataDir,historyStore,propertySchemaStore,meshStrategyStore,getLoadState:id=>documentLoader.status(id)});
+function assertWorkspaceNotDeleted(id){
+  if(workspaces.deleted(id))throw new GatewayRequestError('WORKSPACE_DELETED','工程已删除，请打开其他工程。');
+}
 const sourceInspector=new SnapshotSourceInspector({executablePath:path.resolve(process.env.GEOMETRY_SOURCE_INSPECTOR_PATH||path.join(rootDir,'geometry-worker','build','cad_snapshot_source_inspector.exe')),roots:['history','project-assets','project-transactions','history-quarantine'].map(name=>path.join(dataDir,name)),env:{...process.env,PATH:[occtBin,mingwBin,process.env.PATH||''].filter(Boolean).join(path.delimiter)}});
 const projectFiles = new ProjectFileService({dataDir,historyStore,propertySchemaStore,projectDataStore,command,inspectSources:file=>sourceInspector.inspect(file),maxUnpackedBytes:maxProjectUnpackedBytes,maxPackedBytes:maxProjectUploadBytes,onExecutionStart:()=>modelingTasks.enterExecuting(),onCommitStart:()=>modelingTasks.beginCommit(),onRecoveryStart:()=>modelingTasks.beginRecovery(),captureExecutionState:()=>documentLoader.generation,assertExecutionState:(_id,generation)=>{if(generation!==documentLoader.generation)throw new NativeChannelError('WORKER_INSTANCE_CHANGED','工程打开期间几何进程已变化，未提交跨进程结果；正在恢复原工程。');},onWarning:(message)=>process.stderr.write(`${message}\n`)});
 function sourceHistorySignature(id){const history=historyStore.get(id);return createHash('sha256').update(JSON.stringify({stateToken:projectStateToken(id,history),...historyStore.sourceCheckpoints(id)})).digest('hex');}
@@ -465,6 +533,7 @@ async function command(operation, fields = {}) {
   if(forceStopping||shuttingDown&&!runningDocuments.has(fields.documentId))throw new GatewayRequestError('SERVICE_STOPPING','后台正在停止，未开始新的工程操作。');
   if (!worker) startWorker();
   const id = fields.documentId;
+  if(id)assertWorkspaceNotDeleted(id);
   if(id)projectFiles.assertModelAccess(id);
   if(id&&operation!=="document.restore"&&!projectTransactions.active.has(id)){
     try{projectTransactions.assertWritable(id);}catch(error){return {ok:false,protocolVersion:1,documentId:id,code:error.code,error:error.message};}
@@ -2013,6 +2082,7 @@ function serializeDocument(id, action, {loadDocument=true,inputBytes=0,task,sign
   if(shuttingDown)return Promise.reject(new GatewayRequestError('SERVICE_STOPPING','后台正在停止，未接收新的工程操作。'));
   const ownedAction=async()=>{
     if(shuttingDown)throw new GatewayRequestError('SERVICE_STOPPING','该操作尚未开始，已随后台停机取消排队。');
+    assertWorkspaceNotDeleted(id);
     runningDocuments.add(id);
     const execute=async()=>{if(loadDocument){projectFiles.assertModelAccess(id);sourceRestores.assertModelAccess();if(!worker)startWorker();await documentLoader.ensure(id);}return action();};
     try{return await (loadDocument?sourceAccessGate.read(execute):execute());}finally{runningDocuments.delete(id);}
@@ -2217,17 +2287,30 @@ const server = createServer(async (request, response) => {
         }),{loadDocument:false});
         response.setHeader('Cache-Control','no-store');sendJson(response,statusFor(view),view);return;
       }
-      if(request.method==="GET" && !workspaceMatch[2]){sendJson(response,200,{ok:true,project:workspaces.get(id)});return;}
+      if(request.method==="GET" && !workspaceMatch[2]){assertWorkspaceNotDeleted(id);sendJson(response,200,{ok:true,project:workspaces.get(id)});return;}
       if(request.method==="POST" && !workspaceMatch[2]){const input=await readJson(request);const project=await serializeDocument(id,()=>workspaces.rename(id,input.name));sendJson(response,200,{ok:true,project});return;}
+      if(request.method==='DELETE'&&!workspaceMatch[2]){
+        authorizeModelingTaskRequest(request,webOrigin,port);requestDocumentId=id;
+        const input=await readJson(request);
+        if(id==='default'||input?.currentDocumentId===id)throw new GatewayRequestError('WORKSPACE_DELETE_ACTIVE','请切换到其他工程后删除。默认工作区用于启动，不能删除。');
+        if(!input||typeof input.currentDocumentId!=='string'||!workspaces.known(documentId(input.currentDocumentId))||input.token!==null&&!/^[a-f0-9]{64}$/.test(input.token)||typeof input.updatedAt!=='string'||!Number.isFinite(Date.parse(input.updatedAt)))throw new GatewayRequestError('INVALID_ARGUMENT','删除工程前需要核对工程和恢复快照。');
+        if(!workspaces.deleted(id))try{
+          await piRuntime.withDocumentQuiescent(id,()=>serializeDocument(id,()=>sourceAccessGate.read(()=>{
+            projectTransactions.assertWritable(id);projectFiles.assertModelAccess(id);
+            workspaces.remove(id,input);
+          }),{loadDocument:false}));
+        }catch(error){if(error.code!=='WORKSPACE_DELETED'||!workspaces.deleted(id))throw error;}
+        sendJson(response,200,{ok:true,documentId:id});return;
+      }
       if(request.method==="POST" && workspaceMatch[2]==="activate"){
         authorizeModelingTaskRequest(request,webOrigin,port);
         requestDocumentId=id;if([...url.searchParams].length)throw new GatewayRequestError('WORKSPACE_ACTIVATION_ARGUMENTS','工程切换不接受查询参数。');
         const body=await readJson(request);let activation;
         if(!body||Array.isArray(body)||typeof body!=='object')throw new GatewayRequestError('WORKSPACE_ACTIVATION_ARGUMENTS','工程切换输入无效。');
         if(Object.keys(body).length){try{if(Object.keys(body).length!==1||!Object.hasOwn(body,'command'))throw Error();activation=normalizeWorkspaceActivation(body.command);if(activation.documentId!==id||request.headers['x-request-id']!==activation.requestId)throw Error();}catch{throw new GatewayRequestError('WORKSPACE_ACTIVATION_ARGUMENTS','工程切换需要匹配接口和请求号的唯一 command。');}}
-        const ids=activation?[activation.sourceDocumentId,id]:[id];
+        const ids=activation&&!workspaces.deleted(activation.sourceDocumentId)?[activation.sourceDocumentId,id]:[id];
         const view=await piRuntime.withDocumentsQuiescent(ids,()=>serializeDocument(id,()=>sourceAccessGate.read(async()=>{
-          if(activation)await checkWorkspaceSource(activation);
+          if(activation&&!workspaces.deleted(activation.sourceDocumentId))await checkWorkspaceSource(activation);
           const project=workspaces.get(id);if(!project.recoverable)throw new GatewayRequestError('WORKSPACE_UNAVAILABLE','此工程的恢复快照不可用，请打开备份工程包。');
           const result=await command('document.view',{documentId:id});
           return result.ok?withHistoryState({...result,project:workspaces.touch(id),...(activation?{workspaceActivation:activation}:{})},id):result;
@@ -2258,6 +2341,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/api/pi/sessions" && request.method === "POST") {
       const input = await readJson(request);
       const id = documentId(input.documentId || "default");
+      assertWorkspaceNotDeleted(id);
       const sessionId = normalizePiSessionId(input.sessionId);
       piRuntime.assertOwner(sessionId,id);
       const config = preparePiSessionConfig(sessionId,id);
@@ -2293,7 +2377,7 @@ const server = createServer(async (request, response) => {
       sendJson(response,200,{ok:true,documentId:id,streamId,approval});
       return;
     }
-    const piSessionMatch = url.pathname.match(/^\/api\/pi\/sessions\/([A-Za-z0-9_-]{1,80})(?:\/(commands|events))?$/);
+    const piSessionMatch = url.pathname.match(/^\/api\/pi\/sessions\/([A-Za-z0-9_-]{1,80})(?:\/(commands|events|configuration))?$/);
     if (piSessionMatch) {
       const session = piRuntime.get(piSessionMatch[1]);
       if (request.method === "DELETE" && !piSessionMatch[2]) {
@@ -2303,6 +2387,16 @@ const server = createServer(async (request, response) => {
         return;
       }
       if (!session) throw new GatewayRequestError("PI_SESSION_NOT_FOUND", "Pi RPC session is not running.");
+      assertWorkspaceNotDeleted(session.documentId);
+      if (request.method === 'POST' && piSessionMatch[2] === 'configuration') {
+        authorizeModelingTaskRequest(request,webOrigin,port);
+        const input=await readJson(request);
+        if(input.documentId!==session.documentId||input.streamId!==session.streamId)throw new PiSessionError('PI_STREAM_CHANGED','会话已变化，请重新连接后再应用设置。');
+        if(input.providerId!==undefined&&(typeof input.providerId!=='string'||!/^[A-Za-z0-9._-]{1,80}$/.test(input.providerId)))throw new PiSessionError('INVALID_ARGUMENT','大模型配置 ID 无效。');
+        await reloadPiConfiguration(session,input.providerId);
+        sendJson(response,200,{ok:true,sessionId:session.sessionId,documentId:session.documentId});
+        return;
+      }
       if (request.method === "POST" && !piSessionMatch[2]) {
         const input = await readJson(request);
         const id = documentId(input.documentId || session.documentId);
@@ -2317,8 +2411,16 @@ const server = createServer(async (request, response) => {
         if(input.streamId!==undefined&&input.streamId!==session.streamId)throw new GatewayRequestError('PI_STREAM_CHANGED','Pi 事件流已变化，未执行旧连接的命令；请重新同步会话。');
         if(input.documentId!==undefined&&input.documentId!==session.documentId)throw new GatewayRequestError('PI_SESSION_DOCUMENT_MISMATCH','Pi 会话不属于当前工程，命令未执行。');
         const commandInput = input.command && typeof input.command === "object" ? input.command : input;
-        if (commandInput.type === 'abort' || commandInput.type === 'new_session') piWriteApprovals.revoke(session);
-        const result = await session.request(commandInput);
+        if(['list_conversations','resume_conversation','delete_conversation','restore_conversation','get_skills'].includes(commandInput.type)&&(input.documentId!==session.documentId||input.streamId!==session.streamId))throw new PiSessionError('PI_STREAM_CHANGED','会话已变化，请重新连接后再操作。');
+        if(['delete_conversation','restore_conversation'].includes(commandInput.type))authorizeModelingTaskRequest(request,webOrigin,port);
+        if (commandInput.type === 'abort') piWriteApprovals.revoke(session);
+        let result;
+        if(['list_conversations','resume_conversation','delete_conversation','restore_conversation','switch_session','new_session','fork','clone'].includes(commandInput.type))result=await piConversationCommand(session,commandInput);
+        else if(commandInput.type==='get_skills'){
+          const available=await session.request({type:'get_commands'});
+          const commands=Array.isArray(available.data?.commands)?available.data.commands:[];
+          result={...available,command:commandInput.type,data:{directory:session.skillDirectory,skills:commands.filter(item=>item.source==='skill').map(({name,description})=>({name,description}))}};
+        }else result=await session.request(commandInput,undefined,{verifyImageModel:true});
         const {transport,...nativeResponse}=result;
         sendJson(response, 200, { ok: true, protocolVersion: 2, sessionId: session.sessionId,documentId:session.documentId,streamId:transport.streamId,eventCursorBefore:transport.eventCursorBefore,eventCursor:transport.eventCursor, response: nativeResponse });
         return;
@@ -2915,7 +3017,7 @@ const server = createServer(async (request, response) => {
     // Streaming may already have sent headers before detecting changed bytes.
     // Never attempt a second JSON response or crash the Gateway on disconnect.
     if(response.destroyed)return;if(response.headersSent){response.destroy();return;}
-    const code = error instanceof ProjectBackupError || error instanceof ModelingTaskError || error instanceof PendingProjectInputError || error instanceof DocumentActionError || error instanceof NativeChannelError || error instanceof WorkerCapabilityError || error instanceof GatewayRequestError || error instanceof ProjectFileError || error instanceof DocumentLoadError || error instanceof PiSessionError || error instanceof IdempotencyOutcomeError || error instanceof ProjectTransactionError || error instanceof StepImportError || error instanceof SourceInspectionError || error instanceof StepSourceError || error instanceof SourceAuditError || error instanceof SourceRestoreServiceError || ['WORKSPACE_NOT_FOUND','SERVICE_STOPPING'].includes(error?.code) ? error.code : "GATEWAY_ERROR";
+    const code = error instanceof ProjectBackupError || error instanceof ModelingTaskError || error instanceof PendingProjectInputError || error instanceof DocumentActionError || error instanceof NativeChannelError || error instanceof WorkerCapabilityError || error instanceof GatewayRequestError || error instanceof ProjectFileError || error instanceof DocumentLoadError || error instanceof PiSessionError || error instanceof IdempotencyOutcomeError || error instanceof ProjectTransactionError || error instanceof StepImportError || error instanceof SourceInspectionError || error instanceof StepSourceError || error instanceof SourceAuditError || error instanceof SourceRestoreServiceError || ['WORKSPACE_NOT_FOUND','WORKSPACE_DELETE_CHANGED','SERVICE_STOPPING'].includes(error?.code) ? error.code : "GATEWAY_ERROR";
     sendJson(response, gatewayErrorStatus(code,error instanceof ProjectBackupError||error instanceof PendingProjectInputError||error instanceof ModelingTaskError?error.status:undefined), {
       ok: false,
       protocolVersion: 1,

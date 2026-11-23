@@ -1,4 +1,10 @@
-export type PiMessage = { id: string; role: string; content: string; nativeKey?: string; toolName?: string; toolCallId?: string; status?: string; argumentsText?: string; resultText?: string };
+export const PI_IMAGE_TYPES = ['image/png','image/jpeg','image/gif','image/webp'] as const;
+export type PiImage = { type: 'image'; mimeType: typeof PI_IMAGE_TYPES[number]; data: string };
+export type PiMessage = { id: string; role: string; content: string; images?: PiImage[]; nativeKey?: string; toolName?: string; toolCallId?: string; status?: string; argumentsText?: string; resultText?: string };
+export function piImageType(mimeType: string): mimeType is PiImage['mimeType'] {
+  return PI_IMAGE_TYPES.some(type=>type===mimeType);
+}
+export function piImageUrl(image: PiImage) { return `data:${image.mimeType};base64,${image.data}`; }
 export const PI_DETAIL_PAGE_SIZE=24000;
 /** Presentation paging only; never truncate the native conversation or copied text. */
 export function piDetailPage(content:string,requestedPage:number){
@@ -135,6 +141,13 @@ export function flattenMessages(value: unknown): PiMessage[] {
     const key=piNativeMessageKey(item);
     const id = String(key || `${item.role}-${index}`);
     if (item.role === "toolResult") { const resultText = contentText(item.content) || JSON.stringify(item.content ?? ""); return [{ id:item.toolCallId?`tool-${item.toolCallId}`:id, role: "tool", toolCallId: String(item.toolCallId || ""), toolName: String(item.toolName || "CAD MCP"), status: item.isError ? "error" : "done", content: resultText, resultText }]; }
+    if (item.role === 'user') {
+      const images = Array.isArray(item.content) ? item.content.filter((part): part is PiImage => part?.type==='image'&&piImageType(part.mimeType)&&typeof part.data==='string'&&/^[A-Za-z0-9+/]+={0,2}$/.test(part.data)) : [];
+      const original = contentText(item.content);
+      const marker = '\n\n用户请求：';
+      const content = original.startsWith('当前工程 documentId=') && original.includes(marker) ? original.slice(original.indexOf(marker) + marker.length) : original;
+      return [{ id, role: 'user', content, images }];
+    }
     if (!Array.isArray(item.content)) return [{ id, role: String(item.role || "assistant"), content: contentText(item.content) }];
     return item.content.flatMap((part, partIndex): PiMessage[] => {
       if (!part || typeof part !== "object") return [];
@@ -144,6 +157,6 @@ export function flattenMessages(value: unknown): PiMessage[] {
       if (part.type === "toolCall") { const argumentsText = JSON.stringify(part.arguments ?? {}, null, 2); return [{ id: typeof part.id==='string'&&part.id?`tool-${part.id}`:key, nativeKey:piNativeMessageKey(item),role: "tool", toolCallId: part.id, toolName: String(part.name || "CAD MCP"), status: "call", content: argumentsText, argumentsText }]; }
       return part.type === "text" && typeof part.text === "string" && part.text ? [{ id: key, nativeKey:piNativeMessageKey(item),role: String(item.role || "assistant"), content: part.text,status }] : [];
     });
-  }).filter(item => item.content);
+  }).filter(item => item.content || item.images?.length);
   return flattened.reduce<PiMessage[]>((messages, item) => item.role === "tool" ? mergeToolMessage(messages, item) : [...messages, item], []);
 }

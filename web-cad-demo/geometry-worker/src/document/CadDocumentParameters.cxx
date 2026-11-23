@@ -182,6 +182,9 @@ std::string CadDocument::SetCoordinateSystem(const std::string& requestId, const
   {
   CoordinateSystemRecord record;
   record.Id = parameters.GetString("id");
+  if (parameters.GetBooleanOr("createOnly", false) &&
+      (record.Id == "global" || myCoordinateSystems.Records().count(record.Id)))
+    throw CadError("COORDINATE_SYSTEM_EXISTS", "This coordinate system ID is already in use. Choose a new ID.");
   record.Name = parameters.GetStringOr("name", record.Id);
   record.Kind = parameters.GetStringOr("kind", "cartesian");
   record.Origin = vector3(parameters, "origin", {0,0,0});

@@ -43,8 +43,17 @@ namespace occweb
 {
 PrimitiveBuildResult BuildNamedPrimitive(const FeatureNode& feature)
 {
-  const gp_Vec xv(number(feature,"csXAxisX",1),number(feature,"csXAxisY"),number(feature,"csXAxisZ"));
-  const gp_Vec yv(number(feature,"csYAxisX"),number(feature,"csYAxisY",1),number(feature,"csYAxisZ"));
+  gp_Vec xv(number(feature,"csXAxisX",1),number(feature,"csXAxisY"),number(feature,"csXAxisZ"));
+  gp_Vec yv(number(feature,"csYAxisX"),number(feature,"csYAxisY",1),number(feature,"csYAxisZ"));
+  const auto plane = feature.StringParameters.find("coordinatePlane");
+  if (plane != feature.StringParameters.end() && plane->second != "XY")
+  {
+    const gp_Vec z(gp_Dir(xv.Crossed(yv)));
+    if (plane->second == "YZ") xv = z.Crossed(gp_Vec(gp_Dir(xv)));
+    else if (plane->second != "XZ")
+      throw CadError("INVALID_CONSTRUCTION_PLANE", "Construction plane must be XY, XZ or YZ.");
+    yv = z;
+  }
   const gp_Dir xd(xv),zd(xv.Crossed(yv));
   const gp_Ax2 frame(gp_Pnt(number(feature,"csOriginX"),number(feature,"csOriginY"),number(feature,"csOriginZ")),zd,xd);
   // Preserve the stored coordinate convention for existing projects. Frame

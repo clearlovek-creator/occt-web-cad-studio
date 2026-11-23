@@ -28,7 +28,7 @@ import {
   type ModelingSelection,
 } from "./command-contract.ts";
 
-export type AgentProviderSummary = { id: string; name: string; baseUrl: string; model: string; protocol: "auto" | "responses" | "chat-completions"; priority?: number; toolCalling?: boolean; enabled: boolean; apiKeyConfigured: boolean };
+export type AgentProviderSummary = { id: string; name: string; baseUrl: string; model: string; protocol: "auto" | "responses" | "chat-completions"; priority?: number; toolCalling?: boolean; supportsImages?: boolean; enabled: boolean; apiKeyConfigured: boolean };
 export type AgentProviderInput = Omit<AgentProviderSummary, "apiKeyConfigured"> & { apiKey?: string };
 export type AgentResourceSummary = { id: string; name: string; kind: "skill" | "knowledge"; bytes: number; updatedAt: string };
 export type AgentConversationEntityRef = { kind: string; id: string; label?: string };
@@ -1042,6 +1042,17 @@ export class ModelingController<TModel = unknown> {
   async renameWorkspace(name:string):Promise<WorkspaceMetadata>{
     this.assertNoWorkspaceTransfer();
     const response=await this.fetchImpl(`${this.apiRoot}/projects/${encodeURIComponent(this.state.documentId)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})}),payload=await response.json();if(!response.ok || !payload.ok)throw new Error(payload.error || "工程重命名失败");return payload.project;
+  }
+  async deleteWorkspace(project: WorkspaceMetadata):Promise<void>{
+    this.assertNoWorkspaceTransfer();
+    const currentDocumentId=this.state.documentId;
+    if(project.documentId===currentDocumentId)throw new Error('请先切换到其他工程。');
+    const response=await this.fetchImpl(`${this.apiRoot}/projects/${encodeURIComponent(project.documentId)}`,{
+      method:'DELETE',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({currentDocumentId,token:project.token,updatedAt:project.updatedAt}),
+    });
+    const payload=await response.json();
+    if(!response.ok||!payload.ok||payload.documentId!==project.documentId)throw new Error(payload.error||'未能确认工程删除，请刷新列表核对。');
   }
   async restoreWorkspace<TResponse extends ModelingCommandResponse=ModelingCommandResponse>(id:string):Promise<TResponse>{
     if(id===this.state.documentId)return this.readCurrentWorkspace<TResponse>();

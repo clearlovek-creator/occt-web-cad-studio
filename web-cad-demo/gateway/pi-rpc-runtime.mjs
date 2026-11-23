@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import {waitChildExit} from './child-exit.mjs';
@@ -8,7 +8,7 @@ import {BoundedJsonLines} from './bounded-json-lines.mjs';
 import {PI_RPC_TIMEOUTS,piRpcTimeoutMs} from '../shared/pi-rpc-timeouts.mjs';
 import {backendChildArgs,backendChildEnvironment} from './backend-runtime.mjs';
 import {backendEnvironment} from './backend-release.mjs';
-import {ownedPiResumeFile} from './pi-resume-file.mjs';
+import {ownedPiResumeFile, piConversationId} from './pi-resume-file.mjs';
 import {ensurePiSessionOwner,inspectPiSessionOwner,adoptPiSessionOwner,publicPiSessionOwner,assertFreshPiDocument,PiSessionOwnershipError} from './pi-session-ownership.mjs';
 
 export const PI_RPC_LIMITS=Object.freeze({requestBytes:2*1024*1024,responseBytes:64*1024*1024,pendingCount:64,pendingBytes:4*1024*1024,stdinBytes:4*1024*1024,stderrBytes:64*1024,eventBytes:1024*1024,historyBytes:4*1024*1024,historyCount:1000,stopMs:5000});
@@ -78,9 +78,10 @@ export async function hasSavedPiSession(sessionRoot) {
 }
 
 export class PiRpcSession extends EventEmitter {
-  constructor({ sessionId, documentId, cliPath, cliArgs = [], extensionPath, cwd, sessionRoot, agentConfigDir, env = process.env, spawnImpl = spawn,limits={},commandGuard }) {
+  constructor({ sessionId, documentId, cliPath, cliArgs = [], extensionPath, cwd, sessionRoot, agentConfigDir, skillDirectory, env = process.env, spawnImpl = spawn,limits={},commandGuard }) {
     super();
     this.sessionId = sessionId || `pi-${crypto.randomUUID()}`;
+    this.skillDirectory = skillDirectory;
     this.documentId = documentId || "default";
     Object.defineProperty(this,'documentId',{writable:false,configurable:false});
     Object.defineProperty(this,'sessionId',{writable:false,configurable:false});
@@ -115,7 +116,17 @@ export class PiRpcSession extends EventEmitter {
     if(this.disposed)throw new PiSessionError('PI_SESSION_DISPOSED','Pi 会话已永久关闭，不能由迟到的重连请求重新启动。');
   }
 
-  async start({ resume = false } = {}) {
+  async selectConversation(file) {
+    const selection = path.join(this.agentConfigDir, 'web-cad-active-conversation');
+    if(!file){await rm(selection,{force:true});return;}
+    const temporary = `${selection}.${crypto.randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary,piConversationId(file),{flag:'wx',mode:0o600});
+      await rename(temporary,selection);
+    } finally { await rm(temporary,{force:true}); }
+  }
+
+  async start({ resume = false, conversationId } = {}) {
     this.assertReusable();
     if (this.starting) return this.starting;
     if(this.stoppingChild){await this.#waitRetired();this.assertReusable();if(this.starting)return this.starting;}
@@ -131,7 +142,15 @@ export class PiRpcSession extends EventEmitter {
       this.streamId = crypto.randomUUID();this.sequence=0;this.eventHistory=[];this.eventHistoryBytes=0;
       this.cadToolToken = crypto.randomBytes(32).toString('hex');
       const args = [...backendChildArgs(this.env),this.cliPath, ...this.cliArgs, "--mode", "rpc", "--session-dir", this.sessionRoot, "--extension", this.extensionPath, "--no-builtin-tools"];
-      if(resume){let file;try{file=await ownedPiResumeFile(this.sessionRoot);}catch(error){throw new PiSessionError('PI_SESSION_HISTORY_UNAVAILABLE',error instanceof Error?error.message:'原生 Pi 历史尚未核对，未启动空会话。');}if(file)args.push('--session',file);}
+      if(this.skillDirectory)args.push('--skill',this.skillDirectory);
+      if(resume){
+        let file;
+        try{
+          const selection=conversationId??await readFile(path.join(this.agentConfigDir,'web-cad-active-conversation'),'utf8').catch(error=>{if(error.code!=='ENOENT')throw error;});
+          file=await ownedPiResumeFile(this.sessionRoot,selection);
+        }catch(error){throw new PiSessionError('PI_SESSION_HISTORY_UNAVAILABLE',error instanceof Error?error.message:'原生 Pi 历史尚未核对，未启动空会话。');}
+        if(file)args.push('--session',file);
+      }
       this.assertReusable();
       const sdkRoot=this.env.CAD_PI_SDK_ROOT;
       const runtimeEnvironment=sdkRoot?Object.fromEntries(Object.entries(backendEnvironment(this.env)).filter(([key])=>!/^(?:JITI_|TSX_|ESBUILD_)/i.test(key))):this.env;
@@ -239,7 +258,7 @@ export class PiRpcSession extends EventEmitter {
     void this.stop().catch(()=>this.emit('diagnostic','Pi process/stdio closure is unconfirmed; replacement remains blocked.'));
   }
 
-  request(input, timeoutMs) {
+  request(input, timeoutMs, { guardOwner, verifyImageModel = false } = {}) {
     const command = validatePiCommand(input, { sessionRoot: this.sessionRoot });
     if(timeoutMs===undefined)timeoutMs=piRpcTimeoutMs(command.type);
     if(this.disposed)return Promise.reject(new PiSessionError('PI_SESSION_DISPOSED','Pi 会话已永久关闭，未发送新的 RPC 命令。'));
@@ -249,8 +268,16 @@ export class PiRpcSession extends EventEmitter {
     let line;try{line=JSON.stringify({...command,id})+'\n';}catch{return Promise.reject(new PiSessionError('PI_RPC_REQUEST_INVALID','Pi 请求不可序列化，未发送。'));}
     const bytes=Buffer.byteLength(line),urgent=controls.has(command.type),reserveCount=Math.min(4,Math.max(0,this.limits.pendingCount-1)),reserveBytes=Math.min(65536,Math.floor(this.limits.pendingBytes/8)),reserveStdin=Math.min(65536,Math.floor(this.limits.stdinBytes/8));
     if(bytes>this.limits.requestBytes)return Promise.reject(new PiSessionError('PI_RPC_REQUEST_LIMIT','Pi 请求超出字节预算，未发送。'));
+    if(verifyImageModel&&command.images?.length){
+      const streamId=this.streamId;
+      return this.request({type:'get_state'}).then(({data,transport})=>{
+        if(transport?.streamId!==streamId||this.streamId!==streamId)throw new PiSessionError('PI_STREAM_CHANGED','Pi 会话已变化，图片未发送。');
+        if(!data?.model?.input?.includes('image'))throw new PiSessionError('PI_MODEL_IMAGE_UNSUPPORTED','当前模型不支持图片，请在设置中切换到支持图片的模型。');
+        return this.request(command,timeoutMs,{guardOwner});
+      });
+    }
     if(this.pending.size>=this.limits.pendingCount-(urgent?0:reserveCount)||this.pendingBytes+bytes>this.limits.pendingBytes-(urgent?0:reserveBytes)||(this.child.stdin.writableLength||0)+bytes>this.limits.stdinBytes-(urgent?0:reserveStdin))return Promise.reject(new PiSessionError('PI_RPC_QUEUE_LIMIT','Pi 传输请求已满，本条未发送；停止和状态查询保留独立余量。'));
-    try{this.commandGuard?.(command);}catch(error){return Promise.reject(error);}
+    try{this.commandGuard?.(command,guardOwner);}catch(error){return Promise.reject(error);}
     if(!observations.has(command.type))this.commandSequence++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.#settle(id,new PiSessionError('PI_RPC_TIMEOUT',observations.has(command.type)?`Pi 只读请求等待超时：${command.type}。`:`Pi 请求已发送但未确认：${command.type}。可能已经被接受，请核对会话和工程，不要直接重发。`,{outcome:observations.has(command.type)?'unchanged':'unknown'})),timeoutMs);
@@ -319,8 +346,9 @@ export class PiRpcRuntime {
     if(this.closing)throw new PiSessionError('PI_SESSION_OWNER_STOPPING','Pi 运行时正在停止，未开始工程切换。');
     if(this.documentGuards.has(documentId))throw new PiSessionError('PI_DOCUMENT_TRANSFER_BUSY','此工程正在进行工作区操作，未启动新的 AI 命令；只读查询和停止仍可使用。');
   }
-  guardDocumentCommand(documentId,command){
+  guardDocumentCommand(documentId,command,guardOwner){
     if(observations.has(command.type)||['abort','abort_retry'].includes(command.type))return;
+    if(guardOwner&&this.documentGuards.get(documentId)===guardOwner&&!this.closing)return;
     this.assertDocumentAvailable(documentId);
   }
   /** This observes existing processes only: no config writes, owner adoption or restart. */
@@ -367,7 +395,7 @@ export class PiRpcRuntime {
       const prior=this.activityReads.get(documentId);if(prior){await prior.catch(()=>{});if(this.activityReads.get(documentId)===prior)this.activityReads.delete(documentId);}
       const activity=await this.readDocumentActivity(documentId);
       if(activity.status!=='idle')throw new PiSessionError(activity.status==='busy'?'PI_DOCUMENT_ACTIVE':'PI_DOCUMENT_ACTIVITY_UNCONFIRMED',activity.status==='busy'?'原工程的 AI 仍在运行、压缩或排队，未开始工作区操作；请先等待或停止。':'原工程的 AI 状态尚未确认，未开始工作区操作；请恢复原会话并核对任务。',{outcome:'not-started'});
-      return await action(activity);
+      return await action(activity,owner);
     }finally{if(this.documentGuards.get(documentId)===owner)this.documentGuards.delete(documentId);}
   }
 
@@ -427,7 +455,7 @@ export class PiRpcRuntime {
       sessionRoot,
       documentId: input.documentId,
       mode: input.mode,
-      commandGuard:command=>this.guardDocumentCommand(input.documentId||'default',command),
+      commandGuard:(command,guardOwner)=>this.guardDocumentCommand(input.documentId||'default',command,guardOwner),
     });
     this.sessions.set(sessionId, session);
     try { await session.start({ resume }); return session; }

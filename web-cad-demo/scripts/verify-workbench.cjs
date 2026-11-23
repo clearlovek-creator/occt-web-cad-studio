@@ -162,7 +162,38 @@ async function assertModelVisible() {
     await check('both trees visible; instances nested only under their type', async () => { assert.ok(await project.isVisible()); assert.ok(await geometry.isVisible()); const type = project.getByRole('button', { name: /WavePort/ }).filter({ has: page.locator('strong') }).first(); assert.ok(await type.isVisible()); const branch = project.locator('li').filter({ has: page.locator('button strong', { hasText: /^WavePort$/ }) }).last(); assert.equal(await branch.getByRole('button', { name: /Port[12]/ }).count(), 4); assert.equal(await geometry.getByText('Port1', { exact: true }).count(), 0); });
     await check('materials group bodies without losing feature history', async () => { assert.equal(await geometry.locator('[data-material="FR4"] [data-body-id="' + box.bodyId + '"]').count(), 1); assert.equal(await geometry.locator('[data-material="unassigned"] [data-body-id="' + cylinder.bodyId + '"]').count(), 1); assert.ok(await geometry.locator('[data-body-id="' + box.bodyId + '"] .body-feature-list').isVisible()); });
     await page.screenshot({ path: path.join(screenshots, 'desktop.png'), fullPage: true });
-    await check('primitive direct buttons open the correct expression fields', async () => { await page.locator('[data-command="primitive.cylinder"]').click(); assert.equal(await page.getByTestId('advanced-modeling-panel').locator('select[aria-label="基础体类型"]').isVisible(), false); assert.equal(await page.getByTestId('advanced-modeling-panel').locator('select[aria-label="基础体类型"]').inputValue(), 'cylinder'); assert.ok(await page.getByText('半径', { exact: true }).isVisible()); await close(); });
+    await check('primitive direct buttons open readable expression fields', async () => {
+      await page.locator('[data-command="primitive.cylinder"]').click();
+      const panel = page.getByTestId('advanced-modeling-panel');
+      const kind = panel.getByLabel('基础体类型', { exact: true });
+      assert.equal(await kind.isVisible(), false);
+      assert.equal(await kind.inputValue(), 'cylinder');
+      const radius = panel.getByLabel('半径', { exact: true });
+      await radius.fill('boardWidth / 2');
+      assert.equal(await radius.inputValue(), 'boardWidth / 2');
+      assert.equal(await radius.evaluate(node => getComputedStyle(node).fontSize), '12px');
+      assert.equal(await radius.getAttribute('list'), null);
+      await close();
+    });
+    await check('feature expressions use the workbench font and accept variables without a dropdown', async () => {
+      const feature = box.features.find(item => item.type === 'primitive.box');
+      await geometry.locator(`button.feature-tree-label[title^="primitive.box · ${feature.id} ·"]`).first().dblclick();
+      const editor = page.getByTestId('feature-history-controls');
+      const depth = editor.getByLabel('特征参数 depth', { exact: true });
+      await depth.focus();
+      assert.equal(await depth.getAttribute('list'), null);
+      assert.deepEqual(await depth.evaluate(node => {
+        const style = getComputedStyle(node);
+        return [style.fontSize, style.fontFamily === getComputedStyle(node.closest('.cad-shell')).fontFamily];
+      }), ['12px', true]);
+      await editor.getByRole('button', { name: /^boardWidth/ }).click();
+      assert.equal(await depth.inputValue(), 'boardWidth');
+      await depth.press('End');
+      await depth.pressSequentially(' / 2');
+      assert.equal(await depth.inputValue(), 'boardWidth / 2');
+      await editor.screenshot({ path: path.join(screenshots, 'feature-parameters.png') });
+      await close();
+    });
     await check('face-dependent tools preserve their input and volume measures the owning solid', async () => {
       await project.getByRole('button', { name: /Port1 face/ }).click();
       await page.getByTestId('selection-readout').getByText(`面拾取 · ${faceId}`, {exact:true}).waitFor();
@@ -675,7 +706,7 @@ async function assertModelVisible() {
     await check('docked parameters preserve drafts when minimized and when switching to the assistant', async () => {
       await page.locator('[data-command="primitive.box"]').click(); const dialog = page.getByTestId('operation-window');
       const field = page.getByTestId('advanced-modeling-panel').locator('input').first(); await field.fill('boardWidth + 10 mm');
-      const coordinateSelect = page.getByTestId('advanced-modeling-panel').locator('.single-field select').last(); assert.equal(await coordinateSelect.evaluate((node) => getComputedStyle(node).appearance), 'auto');
+      const coordinateSelect = page.getByTestId('advanced-modeling-panel').getByLabel('参考坐标系',{exact:true}); assert.equal(await coordinateSelect.evaluate((node) => getComputedStyle(node).appearance), 'auto');
       await dialog.getByRole('button', { name: '最小化操作窗口', exact: true }).click(); assert.equal(await field.isVisible(), false);
       await dialog.getByRole('button', { name: '展开操作窗口', exact: true }).click(); assert.equal(await field.inputValue(), 'boardWidth + 10 mm');
       assert.equal(await dialog.getAttribute('aria-modal'), 'false');
@@ -812,6 +843,7 @@ async function assertModelVisible() {
       await page.getByRole('button', { name: '参数建模', exact: true }).click();
     });
     await close();
+    await page.getByLabel('构造平面网格间距',{exact:true}).selectOption('1');
     await check('a landing click with sub-four-pixel jitter never locks a footprint or creates a sphere',async()=>{
       const before=await command('document.view');
       const dragToggle=page.getByRole('button',{name:'拖拽建模',exact:true});
@@ -1347,6 +1379,57 @@ async function assertModelVisible() {
         assert.equal(await currentId(),id);
         assert.equal((await command('document.summary')).stateToken,snapshot.stateToken);
       } finally { page.off('request',capture); }
+    });
+    await check('long feature numbers leave room to read and edit the parameter', async () => {
+      const cylinderRadius = 31.144823004794873;
+      const cylinderHeight = '15.000000000000002 mm';
+      const created = await command('primitive.cylinder', { radius: cylinderRadius, height: cylinderHeight, x: 300 });
+      const feature = created.features.at(-1);
+      await page.reload({waitUntil:'networkidle'});
+      await geometry.locator(`button.feature-tree-label[title^="primitive.cylinder · ${feature.id} ·"]`).dblclick();
+      const editor = page.getByTestId('feature-history-controls');
+      const radius = editor.getByLabel('特征参数 radius', { exact: true });
+      assert.equal(await radius.inputValue(), String(cylinderRadius));
+      const radiusField = radius.locator('..');
+      assert.equal(await radiusField.locator('em').count(), 0);
+      assert.ok((await radius.boundingBox()).width > 0.95 * (await radiusField.boundingBox()).width);
+
+      const height = editor.getByLabel('特征参数 height', { exact: true });
+      assert.equal(await height.inputValue(), cylinderHeight);
+      const heightField = height.locator('..');
+      const result = heightField.locator('em');
+      assert.equal(await result.getAttribute('title'), '已提交的计算值：15.000000000000002');
+      assert.ok((await result.boundingBox()).width <= 0.41 * (await heightField.boundingBox()).width);
+      await editor.screenshot({ path: path.join(screenshots, 'feature-long-parameters.png') });
+      await height.fill('16');
+      assert.equal(await result.count(), 0);
+      await close();
+    });
+    await check('workspace deletion switches to the default workspace and removes only the confirmed recovery entry', async () => {
+      await page.getByRole('tab',{name:'工程',exact:true}).click();
+      await newProject();
+      const id=await currentId();
+      assert.notEqual(id,'default');
+      await page.locator('[data-command="project.workspaces"]').click();
+      const manager=page.getByTestId('workspace-manager');
+      const row=manager.locator(`[data-workspace-id="${id}"]`);
+      const remove=row.getByRole('button',{name:'删除工程',exact:true});
+      const dialog=page.getByRole('dialog',{name:'删除工程',exact:true});
+      await remove.click();
+      await dialog.getByRole('button',{name:'取消',exact:true}).click();
+      assert.equal(await currentId(),id);
+      assert.equal((await fetch(api+'/projects/'+id)).status,200);
+      await remove.click();
+      const deleted=page.waitForResponse(response=>response.request().method()==='DELETE'&&response.url().endsWith('/projects/'+id));
+      await switchWithoutSaving(()=>dialog.getByRole('button',{name:'确认删除工程',exact:true}).click());
+      assert.equal((await deleted).status(),200);
+      assert.equal(await currentId(),'default');
+      assert.equal((await fetch(api+'/projects/'+id)).status,410);
+      await page.locator('[data-command="project.workspaces"]').click();
+      await manager.locator('[data-workspace-id="default"]').waitFor();
+      assert.equal(await row.count(),0);
+      assert.equal(await manager.locator('[data-workspace-id="default"]').getByRole('button',{name:'删除工程'}).count(),0);
+      await close();
     });
     assert.deepEqual(errors, []);
     process.stdout.write(JSON.stringify({ passed: passed.length, screenshots, browserErrors: errors }, null, 2) + '\n');

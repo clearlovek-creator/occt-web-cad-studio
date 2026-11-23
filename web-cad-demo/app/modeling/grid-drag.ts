@@ -72,7 +72,7 @@ export function gridDragInstruction(kind: GridDragKind, stage: GridDragStage) {
   const total = needsDragHeight(kind) ? 3 : 2;
   if (stage === "idle") return `1/${total} · 点击${radial ? "中心" : "起点"}`;
   if (stage === "base") return `2/${total} · 移动鼠标确定${radial ? "半径" : flat ? "平面范围" : "底面"}，点击${total === 2 ? "完成" : "锁定底面"}`;
-  return `3/3 · 沿屏幕向上或 Z 轴方向调整${kind === "torus" ? "管半径" : "高度"}，点击完成`;
+  return `3/3 · 沿构造面法向调整${kind === "torus" ? "管半径" : "高度"}，正视时向上移动，再点击完成`;
 }
 
 export function needsDragHeight(kind: GridDragKind) { return !["sphere", "surface-sphere", "disk", "rectangle", "surface-disk", "surface-rectangle"].includes(kind); }

@@ -5,6 +5,7 @@ import type { CoordinateSystemData, MaterialData, ScalarVariableData } from "./P
 import type { DirectModelResult } from "./DirectModelingPanel";
 import type { PrimitiveKind, SurfaceKind, TransformKind } from "./workbench/ribbon-catalog";
 import {useEditorCommands} from "./modeling/CommandEditScope";
+import {CONSTRUCTION_AXES,CONSTRUCTION_PLANES,type ConstructionPlane} from "./modeling/construction-frame";
 
 type Primitive = "box" | "cylinder" | "cone" | "sphere" | "torus" | "wedge" | "prism" | "pyramid" | "tube";
 type Surface = "rectangle" | "disk" | "cylinder" | "cone" | "sphere";
@@ -82,6 +83,7 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
   const [transform, setTransform] = useState<Transform>(initialTransform);
   const [values, setValues] = useState<Record<string, string>>(() => ({ ...defaults(mode === "surface" ? surfaceFields[initialSurface] : mode === "transform" ? transformFields[initialTransform] : primitiveFields[initialPrimitive]), x: "0", y: "0", z: "0", ...Object.fromEntries(Object.entries(initialParameters || {}).filter(([, value]) => typeof value === "number" || typeof value === "string").map(([key, value]) => [key, typeof value === "number" ? Number(value.toPrecision(14)).toString() : String(value)])) }));
   const [coordinateSystemId, setCoordinateSystemId] = useState(String(initialParameters?.coordinateSystemId || "global"));
+  const [coordinatePlane, setCoordinatePlane] = useState<ConstructionPlane>(() => CONSTRUCTION_PLANES.find(plane=>plane===initialParameters?.coordinatePlane) ?? "XY");
   const [sourceCoordinateSystemId, setSourceCoordinateSystemId] = useState("global");
   const [targetCoordinateSystemId, setTargetCoordinateSystemId] = useState("global");
   const [mirrorMode, setMirrorMode] = useState("plane");
@@ -99,9 +101,9 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
     const fields = mode === "surface" ? surfaceFields[surface] : primitiveFields[primitive];
     onDraftChange?.(mode === "surface" ? `surface-${surface}` : primitive, {
       ...Object.fromEntries(fields.map(({ key }) => [key, values[key]])),
-      x: values.x, y: values.y, z: values.z, coordinateSystemId, reset: false,
+      x: values.x, y: values.y, z: values.z, coordinateSystemId, coordinatePlane, reset: false,
     });
-  }, [mode, primitive, surface, values, coordinateSystemId, onDraftChange]);
+  }, [mode, primitive, surface, values, coordinateSystemId, coordinatePlane, onDraftChange]);
 
   const changeKind = (kind: Primitive | Surface | Transform, fields: Field[], setter: (value: never) => void) => {
     setter(kind as never);
@@ -128,13 +130,13 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
     } finally { setBusy(false); }
   };
 
-  const createPrimitive = () => {
-    const parameters = { ...Object.fromEntries(primitiveFields[primitive].map(({ key }) => [key, values[key]])), x: values.x, y: values.y, z: values.z, coordinateSystemId, reset: false };
-    void execute({ operation: `primitive.${primitive}`, parameters });
-  };
-  const createSurface = () => {
-    const parameters = { ...Object.fromEntries(surfaceFields[surface].map(({ key }) => [key, values[key]])), x: values.x, y: values.y, z: values.z, coordinateSystemId, reset: false };
-    void execute({ operation: `surface.${surface}`, parameters });
+  const create = (operation:string, fields:Field[]) => {
+    const parameters = {
+      ...Object.fromEntries(fields.map(({ key }) => [key, values[key]])),
+      x: values.x, y: values.y, z: values.z, coordinateSystemId,
+      ...(coordinatePlane==="XY"?{}:{coordinatePlane}), reset:false,
+    };
+    void execute({operation,parameters});
   };
   const executeTransform = () => {
     if (!model) return;
@@ -154,6 +156,15 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
     } catch (reason) { setMessage(reason instanceof Error ? reason.message : "变量与建模操作失败，未提交部分修改。"); } finally{setBusy(false);}
   };
 
+  const axes=CONSTRUCTION_AXES[coordinatePlane];
+  const placementFields=<>
+    <p className="subsection-label">原点与坐标系</p>{fieldGrid(["x","y","z"].map((key,index)=>({key,label:coordinatePlane==="XY"?key.toUpperCase():`位置 ${axes[index]}`,defaultValue:"0",unit:"mm"})))}
+    <div className="compact-fields">
+      <label><span>参考坐标系</span><select aria-label="参考坐标系" value={coordinateSystemId} onChange={event=>setCoordinateSystemId(event.target.value)}>{coordinates.map(item=><option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}</select></label>
+      <label><span>建模平面</span><select aria-label="建模参考平面" value={coordinatePlane} onChange={event=>setCoordinatePlane(event.target.value as ConstructionPlane)}>{CONSTRUCTION_PLANES.map(plane=><option key={plane}>{plane}</option>)}</select></label>
+    </div>
+  </>;
+  const planeFields=(fields:Field[])=>coordinatePlane==="XY"?fields:fields.map(field=>({...field,label:field.label.replace(/ ([XYZ])$/u,(_,axis:string)=>" "+axes["XYZ".indexOf(axis)])}));
   return <section className="panel-section direct-modeling advanced-modeling" data-testid="advanced-modeling-panel">
     {onSwitchToDrag && <div className="modeling-method-handoff"><span>参数建模 · 支持数值、变量与表达式</span><button type="button" aria-keyshortcuts="Alt+M" disabled={busy} onClick={onSwitchToDrag} title="保留参数草稿，返回视口绘制；Alt+M（输入框内也可使用）">切换拖拽建模</button></div>}
     <div className="section-heading compact"><div><span className="eyebrow">OCCT DIRECT MODELING</span><h2>{mode === "primitive" ? "创建基础体" : mode === "surface" ? "创建基础面" : mode === "transform" ? "几何变换" : "基础体与变换"}</h2></div><span className="feature-badge">3D</span></div>
@@ -161,19 +172,17 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
       <select hidden={fixedKind} className="operation-select" aria-label="基础体类型" value={primitive} onChange={(event) => changeKind(event.target.value as Primitive, primitiveFields[event.target.value as Primitive], setPrimitive)}>
         <option value="box">Box 长方体</option><option value="cylinder">Cylinder 圆柱</option><option value="cone">Cone 圆锥</option><option value="sphere">Sphere 球</option><option value="torus">Torus 圆环</option><option value="wedge">Wedge 楔体</option><option value="prism">Prism 棱柱</option><option value="pyramid">Pyramid 棱台</option><option value="tube">Tube 圆管</option>
       </select>
-      {fieldGrid(primitiveFields[primitive])}
-      <p className="subsection-label">原点与坐标系</p>{fieldGrid([{ key: "x", label: "X", defaultValue: "0", unit: "mm" }, { key: "y", label: "Y", defaultValue: "0", unit: "mm" }, { key: "z", label: "Z", defaultValue: "0", unit: "mm" }])}
-      <label className="single-field"><span>参考坐标系</span><select aria-label="参考坐标系" value={coordinateSystemId} onChange={(event) => setCoordinateSystemId(event.target.value)}>{coordinates.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}</select></label>
-      <button className="primary-action" disabled={busy} onClick={createPrimitive}>{busy ? "正在创建…" : "创建基础体"}</button>
+      {fieldGrid(planeFields(primitiveFields[primitive]))}
+      {placementFields}
+      <button className="primary-action" disabled={busy} onClick={()=>create(`primitive.${primitive}`,primitiveFields[primitive])}>{busy ? "正在创建…" : "创建基础体"}</button>
     </>}
     {mode === "surface" && <>
       <select hidden={fixedKind} className="operation-select" aria-label="基础面类型" value={surface} onChange={(event) => changeKind(event.target.value as Surface, surfaceFields[event.target.value as Surface], setSurface)}>
         <option value="rectangle">Rectangle 矩形面</option><option value="disk">Disk 圆面</option><option value="cylinder">Cylinder 圆柱面</option><option value="cone">Cone 圆锥面</option><option value="sphere">Sphere 球面</option>
       </select>
-      {fieldGrid(surfaceFields[surface])}
-      <p className="subsection-label">原点与坐标系</p>{fieldGrid([{ key: "x", label: "X", defaultValue: "0", unit: "mm" }, { key: "y", label: "Y", defaultValue: "0", unit: "mm" }, { key: "z", label: "Z", defaultValue: "0", unit: "mm" }])}
-      <label className="single-field"><span>参考坐标系</span><select aria-label="参考坐标系" value={coordinateSystemId} onChange={(event) => setCoordinateSystemId(event.target.value)}>{coordinates.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id}</option>)}</select></label>
-      <button className="primary-action" disabled={busy} onClick={createSurface}>{busy ? "正在创建…" : "创建基础面"}</button>
+      {fieldGrid(planeFields(surfaceFields[surface]))}
+      {placementFields}
+      <button className="primary-action" disabled={busy} onClick={()=>create(`surface.${surface}`,surfaceFields[surface])}>{busy ? "正在创建…" : "创建基础面"}</button>
     </>}
     {mode !== "primitive" && mode !== "surface" && <>
       <p className="property-target">操作对象：{model?.bodyName || model?.bodyId || "未选择 Body"}</p>

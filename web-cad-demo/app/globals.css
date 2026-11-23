@@ -139,7 +139,9 @@ button.tree-action:hover{background:#dbeaf6;outline:1px solid #b2d0e5}
 .body-inline-editor input,.body-inline-editor select,.body-inline-editor button{min-width:0;height:23px;border:1px solid #aab5bd;background:#fff;font-size:8px}
 .body-inline-editor input[type=color]{padding:1px}
 
-.expression-fields input { min-width: 0; font-family: "Cascadia Mono", Consolas, monospace; }
+.compact-fields.expression-fields > label { font-size: 12px; }
+.expression-fields .number-field input { font-family: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
+.expression-fields .number-field em { font-family: inherit; font-size: 11px; }
 .advanced-modeling code { color: #85b7e9; }
 .inline-dialog { margin-top: 12px; padding: 14px; border: 1px solid #d2953d; border-radius: 4px; background: #172331; box-shadow: 0 12px 30px #0008; }
 .inline-dialog h3 { margin: 0 0 6px; color: #ffd08a; font-size: 14px; }
@@ -255,9 +257,11 @@ body { font-size: 13px; }
 .feature-lifecycle-actions button { flex: 1 1 0; min-width: 0; height: 29px; margin: 0; border: 1px solid #8f9daa; border-radius: 2px; background: linear-gradient(white,#e4e8ec); color: #2e4557; font-size: 9px; font-weight: 600; cursor: pointer; }
 .feature-lifecycle-actions .feature-delete-button, .feature-lifecycle-actions .feature-delete-confirm { border-color: #b16a6a; background: #fff0f0; color: #922f2f; }
 .feature-lifecycle-hint { margin-top: 7px; }
-.feature-expression-input { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; border: 1px solid #aab4bd; background: #fff; }
+.expression-parameter-grid > label { font: inherit; font-size: 12px; }
+.feature-expression-input { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(40%); align-items: center; border: 1px solid #aab4bd; background: #fff; }
 .feature-expression-input:focus-within { border-color: #3787bd; box-shadow: 0 0 0 1px #9bc9e7; }
-.feature-expression-input input { width: 100%; border: 0; box-shadow: none; font-family: "Cascadia Mono", Consolas, monospace; }
+.expression-parameter-grid .feature-expression-input input { width: 100%; border: 0; font: inherit; font-variant-numeric: tabular-nums; }
+.expression-parameter-grid .feature-expression-input input:focus { box-shadow: none; }
 
 /* Python Agent control console: lifecycle first, evidence second, input last. */
 .operation-window:has(.agent-cli) {
@@ -380,13 +384,12 @@ body { font-size: 13px; }
   .agent-lifecycle { padding-right: 12px; padding-left: 12px; }
   .agent-lifecycle-step small { display: none; }
 }
-.feature-expression-input input:focus { border: 0; box-shadow: none; }
-.feature-expression-input em { padding: 0 6px; color: #72808b; font: normal 8px "Cascadia Mono", Consolas, monospace; white-space: nowrap; }
+.feature-expression-input em { min-width: 0; padding: 0 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #586978; font-size: 11px; font-style: normal; font-variant-numeric: tabular-nums; }
 .feature-variable-reference { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; padding: 7px; border: 1px solid #c2cbd2; background: #f4f7f9; }
-.feature-variable-reference > span { width: 100%; color: #65737e; font-size: 8px; font-weight: 700; text-transform: uppercase; }
-.feature-variable-reference button { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 3px 6px; border: 1px solid #9bb4c8; background: #eaf4fb; color: #245f88; font: 9px "Cascadia Mono", Consolas, monospace; cursor: pointer; }
-.feature-variable-reference button small { color: #708696; font-size: 8px; }
-.feature-variable-reference > small { color: #78858f; font-size: 8px; }
+.feature-variable-reference > span { width: 100%; color: #586978; font-size: 11px; font-weight: 600; }
+.feature-variable-reference button { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 3px 6px; border: 1px solid #9bb4c8; background: #eaf4fb; color: #245f88; font-size: 11px; cursor: pointer; }
+.feature-variable-reference button small { color: #586978; font-size: inherit; font-variant-numeric: tabular-nums; }
+.feature-variable-reference > small { color: #586978; font-size: 11px; }
 .property-editor-list{display:grid;gap:5px;margin-top:10px}.property-editor-row{display:grid;grid-template-columns:1.2fr .8fr 1fr auto;gap:4px;align-items:center}.property-editor-row input,.property-editor-row select{min-width:0;height:28px;padding:0 5px;border:1px solid #aab4bd;background:#fff;color:#25323c;font-size:9px}.property-editor-row button,.property-editor-list>button{height:28px;padding:0 7px;border:1px solid #8fa2b1;background:linear-gradient(#fff,#e4e9ed);color:#30526a;font-size:9px;cursor:pointer}
 .agent-plan{display:grid;gap:6px;margin-top:10px}.agent-plan-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px}.agent-plan-actions button{margin-top:0}.agent-plan-step{display:grid;gap:2px;padding:7px 8px;border:1px solid #b9c8d3;background:#eef5f9;color:#2c536d}.agent-plan-step strong{font:11px Consolas,monospace}.agent-plan-step span,.agent-question{font-size:10px;line-height:1.4}.agent-question{margin:0;padding:6px 8px;border:1px solid #d6b37a;background:#fff6e6;color:#80561e}
 .agent-conversation{display:grid;gap:6px;max-height:260px;overflow:auto;padding:6px;background:#eef3f6;border:1px solid #b9c8d1}.agent-message{padding:7px 8px;border:1px solid #c4d0d8;background:#fff;color:#304451}.agent-message-user{background:#e2f0fa;border-color:#9fc3d9}.agent-message header{display:flex;justify-content:space-between;font-size:9px;color:#557083}.agent-message p{margin:4px 0 0;white-space:pre-wrap;font-size:10px;line-height:1.45}.agent-message-links{display:block;margin-top:4px;color:#6a7f8b}.agent-query-actions{display:flex;gap:6px;margin-top:6px}.agent-model-query pre{max-height:180px;overflow:auto;white-space:pre-wrap;font:9px Consolas,monospace;background:#152431;color:#dceaf2;padding:8px}.agent-settings-link{margin-top:6px}

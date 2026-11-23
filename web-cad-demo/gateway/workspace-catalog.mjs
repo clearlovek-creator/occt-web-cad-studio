@@ -14,7 +14,8 @@ export class WorkspaceCatalog {
       this.records.set(item.documentId,item);
     }
   }
-  known(id){return validId.test(id) && (id==="default" || this.records.has(id) || this.historyStore.hasDocument(id)&&Boolean(this.historyStore.get(id).current || this.historyStore.get(id).restoreError));}
+  deleted(id){return Boolean(this.records.get(id)?.deletedAt);}
+  known(id){return validId.test(id) && !this.deleted(id) && (id==="default" || this.records.has(id) || this.historyStore.hasDocument(id)&&Boolean(this.historyStore.get(id).current || this.historyStore.get(id).restoreError));}
   write(item){
     const target=path.join(this.directory,`${item.documentId}.json`),temporary=`${target}.tmp-${crypto.randomUUID()}`;
     fs.writeFileSync(temporary,JSON.stringify(item),"utf8");try{fs.renameSync(temporary,target);}catch(error){fs.rmSync(temporary,{force:true});throw error;}
@@ -53,10 +54,19 @@ export class WorkspaceCatalog {
     this.write({...this.record(id),lastGeneratedToken:token,lastGeneratedAt:new Date().toISOString()});return this.get(id);
   }
   touch(id){this.write({...this.record(id),updatedAt:new Date().toISOString()});return this.get(id);}
+  remove(id, expected){
+    if(this.deleted(id))return;
+    const current=this.get(id);
+    if(current.token!==expected.token||current.updatedAt!==expected.updatedAt){
+      const error=new Error('工程已变化，请刷新列表并重新确认删除。');error.code='WORKSPACE_DELETE_CHANGED';throw error;
+    }
+    this.write({...this.record(id),deletedAt:new Date().toISOString()});
+    this.tokens.delete(id);
+  }
   list(query=""){
     const ids=new Set([...this.records.keys(),...this.historyStore.documentIds().filter(id=>{const history=this.historyStore.get(id);return history.current || history.restoreError;})]);
     const needle=String(query).trim().slice(0,240).toLowerCase();
     const updated=id=>[this.records.get(id)?.updatedAt || "",this.historyStore.get(id).events.at(-1)?.timestamp || ""].sort().at(-1);
-    return [...ids].filter(id=>`${this.records.get(id)?.name || (id==="default" ? "未命名工程" : `恢复工程 ${id.slice(-10)}`)} ${id}`.toLowerCase().includes(needle)).sort((a,b)=>updated(b).localeCompare(updated(a))).slice(0,200).map(id=>this.get(id));
+    return [...ids].filter(id=>!this.deleted(id)&&`${this.records.get(id)?.name || (id==="default" ? "未命名工程" : `恢复工程 ${id.slice(-10)}`)} ${id}`.toLowerCase().includes(needle)).sort((a,b)=>updated(b).localeCompare(updated(a))).slice(0,200).map(id=>this.get(id));
   }
 }

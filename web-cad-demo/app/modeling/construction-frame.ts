@@ -1,8 +1,12 @@
 import {makeGridDragCommand,type GridDragKind,type GridPoint} from "./grid-drag";
 
 export type Vec3 = readonly [number,number,number];
+export const CONSTRUCTION_PLANES = ["XY","XZ","YZ"] as const;
+export type ConstructionPlane = typeof CONSTRUCTION_PLANES[number];
+export const CONSTRUCTION_AXES = { XY:["X","Y","+Z"], XZ:["X","Z","−Y"], YZ:["Y","Z","+X"] } as const;
+export const DEFAULT_CONSTRUCTION_GRID_STEP = 10;
 export type ConstructionCoordinate = {id:string;name:string;origin:readonly number[];xAxis:readonly number[];yAxis:readonly number[];associationMode?:string;referenceState?:string};
-export type ConstructionFrame = {id:string;name:string;origin:Vec3;x:Vec3;y:Vec3;z:Vec3;placementY:Vec3;legacyPlacement:boolean;signature:string};
+export type ConstructionFrame = {id:string;name:string;plane:ConstructionPlane;origin:Vec3;x:Vec3;y:Vec3;z:Vec3;placementY:Vec3;legacyPlacement:boolean;signature:string};
 export const GLOBAL_CONSTRUCTION_COORDINATE:ConstructionCoordinate={id:"global",name:"Global",origin:[0,0,0],xAxis:[1,0,0],yAxis:[0,1,0]};
 const dot=(a:Vec3,b:Vec3)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 const cross=(a:Vec3,b:Vec3):Vec3=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
@@ -17,12 +21,18 @@ function unit(value:Vec3):Vec3 {
 }
 /** Match OCCT's orientation while retaining its historical placement convention:
  * native X/Z offsets use unit directions, but native Y offsets use the stored raw Y. */
-export function constructionFrame(coordinate:ConstructionCoordinate):ConstructionFrame {
+export function constructionFrame(coordinate:ConstructionCoordinate, plane:ConstructionPlane="XY"):ConstructionFrame {
   if(coordinate.associationMode==="associative" && coordinate.referenceState!=="resolved")throw new Error("所选面坐标系引用失效，请重新关联有效面；不会使用旧位置绘制。");
   const origin=vector(coordinate.origin),rawX=vector(coordinate.xAxis),rawY=vector(coordinate.yAxis),x=unit(rawX),normalizedY=unit(rawY);
   if(Math.abs(dot(x,normalizedY))>.999999)throw new Error("构造坐标轴接近平行，无法确定可靠的建模平面。");
   const z=unit(cross(x,normalizedY)),y=unit(cross(z,x));
-  return {id:coordinate.id,name:coordinate.name,origin,x,y,z,placementY:rawY,legacyPlacement:Math.abs(dot(rawY,x))>1e-9 || Math.abs(dot(rawY,y)-1)>1e-9,signature:JSON.stringify([coordinate.id,origin,rawX,rawY])};
+  const u=plane==="YZ"?y:x, v=plane==="XY"?y:z;
+  return {
+    id:coordinate.id,name:coordinate.name,plane,origin,x:u,y:v,z:unit(cross(u,v)),
+    placementY:plane==="XY"?rawY:v,
+    legacyPlacement:plane==="XY" && (Math.abs(dot(rawY,x))>1e-9 || Math.abs(dot(rawY,y)-1)>1e-9),
+    signature:JSON.stringify([coordinate.id,plane,origin,rawX,rawY]),
+  };
 }
 export function constructionToWorld(frame:ConstructionFrame,point:Vec3):Vec3 {
   return frame.origin.map((v,i)=>v+frame.x[i]*point[0]+frame.y[i]*point[1]+frame.z[i]*point[2]) as unknown as Vec3;
@@ -37,7 +47,7 @@ export function constructionDragCommand(kind:GridDragKind,start:GridPoint,end:Gr
   const scale=dot(frame.placementY,frame.y),skew=dot(frame.placementY,frame.x);
   const y=command.parameters.y/scale,x=command.parameters.x-skew*y;
   if(![x,y].every(Number.isFinite))throw new Error("坐标变换超出有效范围，未创建几何。");
-  return {...command,parameters:{...command.parameters,x,y,coordinateSystemId:frame.id}};
+  return {...command,parameters:{...command.parameters,x,y,coordinateSystemId:frame.id,...(frame.plane==="XY"?{}:{coordinatePlane:frame.plane})}};
 }
 export function snappedConstructionPoint(frame:ConstructionFrame,world:Vec3,step:number):Vec3 {
   if(!Number.isFinite(step)||step<=0)throw new Error("吸附步长必须为正数。");

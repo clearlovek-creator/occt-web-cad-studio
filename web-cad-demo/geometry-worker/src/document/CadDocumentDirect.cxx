@@ -22,6 +22,8 @@ std::string CadDocument::CreatePrimitive(const std::string& requestId,
   const double z = parameterValue(parameters, "z", "length", 0.0, false, &feature);
   const std::string coordinateSystemId = parameters.GetStringOr("coordinateSystemId", "global");
   feature.StringParameters["coordinateSystemId"] = coordinateSystemId;
+  if (parameters.Has("coordinatePlane"))
+    feature.StringParameters["coordinatePlane"] = parameters.GetString("coordinatePlane");
   ApplyFeatureCoordinates(feature,myCoordinateSystems);
   const std::map<std::string,std::vector<std::string>> fields = {
     {"primitive.box",{"width","depth","height"}}, {"primitive.cylinder",{"radius","height"}},

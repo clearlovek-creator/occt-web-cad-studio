@@ -27,7 +27,7 @@ import {createViewportFrame} from './model/viewport-frame';
 import {MeshWireLayer} from './model/mesh-wire-layer';
 import { gridDragDimensionText, gridDragHeightReference, gridDragInstruction, gridDragSteps, hasDragFootprintMovement, hasDragHeightAdjustment, heightFromScreenDrag, needsDragHeight, shouldSwitchModelingMethod, type GridDragKind, type GridPoint } from "./modeling/grid-drag";
 import { dragPreviewGeometry } from "./modeling/grid-drag-preview";
-import {constructionFrame,constructionToWorld,constructionDragCommand,snappedConstructionPoint,dragDimension,GLOBAL_CONSTRUCTION_COORDINATE,type ConstructionFrame} from "./modeling/construction-frame";
+import {constructionFrame,constructionToWorld,constructionDragCommand,snappedConstructionPoint,dragDimension,GLOBAL_CONSTRUCTION_COORDINATE,DEFAULT_CONSTRUCTION_GRID_STEP,CONSTRUCTION_AXES,CONSTRUCTION_PLANES,type ConstructionFrame,type ConstructionPlane} from "./modeling/construction-frame";
 import { constructionSnapCandidates, pickConstructionSnap, type EdgeSnapPoints } from "./modeling/construction-snap";
 import {alignConstructionGrid,constructionMatrix,createConstructionGrid} from "./modeling/construction-frame-three";
 import {ConstructionControls} from "./workbench/ConstructionControls";
@@ -160,7 +160,6 @@ const defaultBodyColor = 0x7b91aa;
 const defaultEdgeColor = 0x203040;
 const selectionColor = 0xffb14a;
 const selectionEmissive = 0x3a1b00;
-const bodySelectionColor = 0x688fc6;
 const dockedOperations = new Set<OperationKind>(["primitives", "surfaces", "transform", "boolean", "pattern", "patternCircular", "patternRectangular", "patternMirror", "fillet", "chamfer", "draft", "revolve", "offsetFeature", "generated", "history", "shapeCheck", "bodyAppearance"]);
 
 type DocumentOwner = { documentId: string; stateToken: string | null };
@@ -276,7 +275,7 @@ export default function CadDemo() {
   const dragGhostRef = useRef<THREE.Group | null>(null);
   const constructionFrameRef=useRef<ConstructionFrame|null>(null);
   const dragFrameRef=useRef<ConstructionFrame|null>(null);
-  const snapStepRef=useRef(1),dragStepRef=useRef(1);
+  const gridStepRef=useRef(DEFAULT_CONSTRUCTION_GRID_STEP),snapStepRef=useRef(DEFAULT_CONSTRUCTION_GRID_STEP),dragStepRef=useRef(DEFAULT_CONSTRUCTION_GRID_STEP);
   const modelRef = useRef<ModelData | null>(null);
   const modelGenerationRef = useRef(0);
   const selectedBodyIdsRef = useRef<string[]>([]);
@@ -390,23 +389,32 @@ export default function CadDemo() {
   const [instanceTypeId, setInstanceTypeId] = useState<string | null>(null);
   const [appearanceBodyId, setAppearanceBodyId] = useState<string | null>(null);
   const controllerState = useModelingController(modelingController);
-  const [constructionSelection,setConstructionSelection]=useState(()=>({documentId:modelingController.getSnapshot().documentId,id:"global"}));
+  const [constructionSelection,setConstructionSelection]=useState(()=>({documentId:modelingController.getSnapshot().documentId,id:"global",plane:"XY" as ConstructionPlane}));
   const constructionId=constructionSelection.documentId===controllerState.documentId?constructionSelection.id:"global";
-  const [snapStep,setSnapStep]=useState(1);
+  const constructionPlane=constructionSelection.documentId===controllerState.documentId?constructionSelection.plane:"XY";
+  const [gridStep,setGridStep]=useState(DEFAULT_CONSTRUCTION_GRID_STEP);
+  const [snapOverride,setSnapOverride]=useState<number|null>(null);
+  const snapStep=snapOverride ?? gridStep;
   const [geometrySnap, setGeometrySnap] = useState(true);
   const geometrySnapRef = useRef(true);
   const constructionCoordinates=model?.coordinateSystems?.length?model.coordinateSystems:[GLOBAL_CONSTRUCTION_COORDINATE];
   const constructionInfo=useMemo(()=>{
     const coordinate=constructionId==="global"?GLOBAL_CONSTRUCTION_COORDINATE:constructionCoordinates.find(item=>item.id===constructionId);
     if(!coordinate)return {frame:null,error:"所选坐标系已删除，请重新选择；不会自动改用 Global。"};
-    try{return {frame:constructionFrame(coordinate),error:null};}catch(reason){return {frame:null,error:reason instanceof Error?reason.message:"构造坐标系无效。"};}
-  },[constructionCoordinates,constructionId]);
+    try{return {frame:constructionFrame(coordinate,constructionPlane),error:null};}catch(reason){return {frame:null,error:reason instanceof Error?reason.message:"构造坐标系无效。"};}
+  },[constructionCoordinates,constructionId,constructionPlane]);
+  const selectConstruction = (id:string, plane:ConstructionPlane) => {
+    cancelDragRef.current();
+    parameterInputRef.current=null;
+    setParameterDraft(null);
+    setConstructionSelection({documentId:controllerState.documentId,id,plane});
+  };
   useEffect(()=>{
     if(dragFrameRef.current && (dragFrameRef.current.signature!==constructionInfo.frame?.signature || dragStepRef.current!==snapStep))cancelDragRef.current();
-    constructionFrameRef.current=constructionInfo.frame;snapStepRef.current=snapStep;
-    if(gridRef.current)alignConstructionGrid(gridRef.current,constructionInfo.frame,gridVisibleRef.current);
+    constructionFrameRef.current=constructionInfo.frame;gridStepRef.current=gridStep;snapStepRef.current=snapStep;
+    if(gridRef.current)alignConstructionGrid(gridRef.current,constructionInfo.frame,gridVisibleRef.current,gridStep);
     invalidateViewportRef.current();
-  },[constructionInfo.frame,snapStep]);
+  },[constructionInfo.frame,gridStep,snapStep]);
   useEffect(()=>{if(dragSessionRef.current?.isStale()){cancelDragRef.current();setStatus("工程已变化，已取消旧绘制，请重新开始。");}},[controllerState.documentId,controllerState.stateToken]);
   const [editorEpoch,setEditorEpoch]=useState(0);
   const editableOperation=activeOperation && ["primitives","surfaces","transform","boolean","pattern","patternCircular","patternRectangular","patternMirror","revolve","fillet","chamfer","draft","offsetFeature","history","projectData","bodyAppearance","generated"].includes(activeOperation);
@@ -534,7 +542,7 @@ export default function CadDemo() {
     const distance=Math.max(camera.position.distanceTo(controls.target),10);
     controls.target.set(...frame.origin);camera.position.copy(controls.target).addScaledVector(new THREE.Vector3(...frame.z),distance);camera.up.set(...frame.y);
     camera.near=Math.max(distance/10000,.0001);camera.far=Math.max(distance*100,10000);camera.updateProjectionMatrix();controls.update();camera.updateMatrixWorld();
-    setStatus("已正视构造面 · "+frame.name+" · 不修改工程");
+    setStatus(`已正视构造面 · ${frame.name} ${frame.plane}`);
   },[]);
   const rememberParameterInput = useCallback((kind: GridDragKind, parameters: Record<string, unknown>) => {
     parameterInputRef.current = { kind, parameters };
@@ -562,6 +570,10 @@ export default function CadDemo() {
       if (command) parameters = command.parameters;
     }
     if (!drag) setParameterDraft(parameters ? { kind, parameters, version: Date.now() } : null);
+    if (drag && (activeOperation==="primitives" || activeOperation==="surfaces") && typeof parameters?.coordinateSystemId==="string") {
+      const plane=CONSTRUCTION_PLANES.find(value=>value===parameters.coordinatePlane) ?? "XY";
+      setConstructionSelection({documentId:modelingController.getSnapshot().documentId,id:parameters.coordinateSystemId,plane});
+    }
     cancelDragRef.current();
     setDragModeling(drag);
     const surface = kind.startsWith("surface-");
@@ -639,13 +651,9 @@ export default function CadDemo() {
     bodyMeshesRef.current.forEach((mesh) => {
       const material = mesh.material as THREE.MeshStandardMaterial;
       const baseColor = Number(mesh.userData.baseColor ?? defaultBodyColor);
-      if (selected.has(String(mesh.userData.bodyId))) {
-        material.color.setHex(bodySelectionColor);
-        material.emissive.setHex(0x000000);
-      } else {
-        material.color.setHex(baseColor);
-        material.emissive.setHex(0x000000);
-      }
+      const isSelected = selected.has(String(mesh.userData.bodyId));
+      material.color.setHex(isSelected ? selectionColor : baseColor);
+      material.emissive.setHex(isSelected ? selectionEmissive : 0x000000);
     });
     selectedBodyIdsRef.current = next;
     setSelectedBodyIds(next);
@@ -972,8 +980,8 @@ export default function CadDemo() {
         const color = metadata?.color || defaultBodyColor;
         const baseColor = new THREE.Color(color).getHex();
         const isSelected = selectedBodyIdsRef.current.includes(presentation.bodyId);
-        material.color.setHex(isSelected ? bodySelectionColor : baseColor);
-        material.emissive.setHex(0x000000);
+        material.color.setHex(isSelected ? selectionColor : baseColor);
+        material.emissive.setHex(isSelected ? selectionEmissive : 0x000000);
         const opacity = Math.max(0.05, Math.min(1, Number(metadata?.opacity ?? 1)));
         material.transparent = opacity < 0.999;
         material.opacity = opacity;
@@ -1756,7 +1764,7 @@ export default function CadDemo() {
     scene.add(grid);
     grid.visible=gridVisibleRef.current;
     gridRef.current = grid;
-    alignConstructionGrid(grid,constructionFrameRef.current,gridVisibleRef.current);
+    alignConstructionGrid(grid,constructionFrameRef.current,gridVisibleRef.current,gridStepRef.current);
 
     let snapCache: { lines: THREE.Line[]; frame: string; candidates: ReturnType<typeof constructionSnapCandidates> } | null = null;
     const snapConstructionPoint = (event: PointerEvent): GridPoint | null => {
@@ -2210,6 +2218,10 @@ export default function CadDemo() {
       const active=modelingController.getSnapshot();
       if(active.documentId!==documentId)return false;
       if(requestError instanceof ModelingCommandError&&requestError.code==='WORKSPACE_READ_SUPERSEDED'&&active.model){displayModel(active.model as ModelData);setStatus('已显示当前工程的最新模型。');return true;}
+      if(requestError instanceof ModelingCommandError&&requestError.code==='WORKSPACE_DELETED'){
+        try{const fallback=await modelingController.restoreWorkspace<ModelData>('default');displayModel(fallback,{replaceScene:true});setStatus('原工程已删除，已打开默认工作区。');return true;}
+        catch(reason){setError(reason instanceof Error?reason.message:'默认工作区打开失败。');setActiveOperation('workspace');return false;}
+      }
       setError(requestError instanceof Error ? requestError.message : "无法连接几何服务。");
       if(requestError instanceof ModelingCommandError&&requestError.code==='SOURCE_RESTORE_RECOVERY_REQUIRED'){setStatus('来源事务需要复核，未加载工程；请打开来源恢复记录。');return false;}
       if(requestError instanceof Error && /恢复工程不存在|未找到持久化快照|恢复快照不可用/.test(requestError.message)){setActiveOperation("workspace");setStatus("上次工程无法自动恢复，请选择可恢复工程或打开备份文件。");return false;}
@@ -2924,7 +2936,7 @@ export default function CadDemo() {
   const operationContent = () => {
     if(activeOperation==='backups')return <ProjectBackupPanel key={controllerState.documentId} documentId={controllerState.documentId} busy={controllerState.busy}/>;
     if(activeOperation==='sources')return <SourceAuditPanel key={controllerState.documentId+':'+sourcePanelView} documentId={controllerState.documentId} stateToken={model?.stateToken??null} initialView={sourcePanelView} geometry={model} blocked={sourceRecoveryBlocked} onModel={result=>{displayModel(result as ModelData,{fitCamera:false});setStatus('工程引用已核对 · R'+result.revision);}} onHistory={featureId=>{setTreeFeatureRepair(null);setFeatureToEdit(featureId??null);setActiveOperation('history');}}/>;
-    if(activeOperation==="workspace")return <WorkspacePanel key={controllerState.documentId} current={workspace.project} onChanged={workspace.refresh} onRequestRestore={restore => requestProjectSwitch("恢复工程", restore)} onRestore={async id => {
+    if(activeOperation==="workspace")return <WorkspacePanel key={controllerState.documentId} current={workspace.project} onChanged={workspace.refresh} onError={setError} onRequestRestore={restore => requestProjectSwitch("切换工程", restore)} onRestore={async id => {
       setBusy(true);
       setError(null);
       try {
@@ -2944,9 +2956,9 @@ export default function CadDemo() {
     if (activeOperation === "bodyAppearance") { const body = model?.bodyMetadata?.find((item) => item.bodyId === appearanceBodyId); return body ? <BodyAppearancePanel key={body.bodyId} body={{ ...body, topologyRevision: body.topologyRevision || 0 }} materials={(model?.materials || []).map((item) => item.name)} onSave={(id,changes)=>updateBodyFromTree(id,changes,true)} /> : <p className="panel-copy">该 Body 已不存在。</p>; }
     if (activeOperation === "agentSettings") return <AgentProviderSettingsPanel />;
     if (activeOperation === "mesh") return <MeshWorkbenchPanel documentId={controllerState.documentId} geometry={model} revision={model?.revision ?? null} selectedBodyId={selectedBodyId || model?.bodyId || null} selectedFaceId={selectionMode === "face" && selectedId?.startsWith("face-") ? selectedId : null} latestResult={meshResults.at(-1)} onMeshResult={handleMeshResult} tasks={meshTasks} qualitySelection={qualitySelection} onLocateQuality={handleLocateQuality} onLocateCadFace={source=>void locateMeshSourceFace(source)} preparationPreviewId={preparationDisplay?.meshJob.jobId||null} onPreparationPreview={handlePreparationPreview} onLocateDiagnostic={target=>void locateDiagnostic(target)} />;
-    if (activeOperation === "agent") return <PiModelingAgentPanel revision={model?.revision ?? null} selection={selectedId && (selectedBodyId || model?.bodyId) ? { kind: selectionMode, bodyId: selectedBodyId || model?.bodyId || "", topologyId: selectionMode === "body" ? undefined : selectedId } : null} onCommitted={(result) => handleDirectModel(result as ModelData)} onOpenSettings={() => setActiveOperation("agentSettings")} />;
-    if (activeOperation === "primitives") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId}} mode="primitive" fixedKind={activeTool?.startsWith("primitive.")} initialPrimitive={activeTool?.startsWith("primitive.") ? activeTool.slice(10) as PrimitiveKind : "box"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
-    if (activeOperation === "surfaces") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId}} mode="surface" fixedKind={activeTool?.startsWith("surface.")} initialSurface={activeTool?.startsWith("surface.") ? activeTool.slice(8) as SurfaceKind : "rectangle"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
+    if (activeOperation === "agent") return <PiModelingAgentPanel revision={model?.revision ?? null} selection={selectedId && (selectedBodyId || model?.bodyId) ? { kind: selectionMode, bodyId: selectedBodyId || model?.bodyId || "", topologyId: selectionMode === "body" ? undefined : selectedId } : null} onCommitted={(result) => handleDirectModel(result as ModelData)} />;
+    if (activeOperation === "primitives") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId,coordinatePlane:constructionPlane}} mode="primitive" fixedKind={activeTool?.startsWith("primitive.")} initialPrimitive={activeTool?.startsWith("primitive.") ? activeTool.slice(10) as PrimitiveKind : "box"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
+    if (activeOperation === "surfaces") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId,coordinatePlane:constructionPlane}} mode="surface" fixedKind={activeTool?.startsWith("surface.")} initialSurface={activeTool?.startsWith("surface.") ? activeTool.slice(8) as SurfaceKind : "rectangle"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
     if (activeOperation === "transform") return <AdvancedModelingPanel key={activeTool} mode="transform" initialTransform={activeTool?.startsWith("transform.") ? activeTool.slice(10) as TransformKind : "translate"} model={model ? { ...model, bodyId: selectedBodyId ?? model.bodyId, bodyName: model.bodyMetadata?.find((body) => body.bodyId === (selectedBodyId ?? model.bodyId))?.name } : null} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} />;
     if (activeOperation === "boolean") return <AdvancedBooleanPanel key={activeTool} initialOperation={activeTool?.startsWith("boolean.") ? activeTool.slice(8) as BooleanKind : "cut"} model={model} onModel={handleDirectModel} />;
     if (activeOperation === "fillet") return (
@@ -3210,7 +3222,10 @@ export default function CadDemo() {
                 <button type="button" aria-keyshortcuts="Alt+M" title={sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "参数建模 · Alt+M 切换；保留已拖拽的尺寸"} aria-pressed={!preferDragModeling} disabled={busy || sourceRecoveryBlocked} onClick={() => changeModelingMethod(false)}>参数建模</button>
               </div>
               {dragModeling && <select className="drag-modeling-kind" aria-label="拖拽建模类型" value={dragPrimitive} disabled={busy || sourceRecoveryBlocked} onChange={(event) => { parameterInputRef.current = null; setParameterDraft(null); setDragPrimitive(event.target.value as GridDragKind); }}>{[["box","长方体"],["cylinder","圆柱体"],["cone","圆锥体"],["sphere","球体"],["torus","圆环体"],["wedge","楔体"],["prism","棱柱"],["pyramid","棱台"],["tube","圆管"],["surface-rectangle","矩形面"],["surface-disk","圆面"],["surface-cylinder","圆柱面"],["surface-cone","圆锥面"],["surface-sphere","球面"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select>}
-              <ConstructionControls coordinates={constructionCoordinates} selectedId={constructionId} frame={constructionInfo.frame} error={constructionInfo.error} step={snapStep} geometrySnap={geometrySnap} disabled={commandBusy || sourceRecoveryBlocked || Boolean(activeOperation)} onCoordinate={id=>{cancelDragRef.current();parameterInputRef.current=null;setParameterDraft(null);setConstructionSelection({documentId:controllerState.documentId,id});}} onStep={step=>{cancelDragRef.current();setParameterDraft(null);setSnapStep(step);}} onGeometrySnap={enabled=>{cancelDragRef.current();geometrySnapRef.current=enabled;setGeometrySnap(enabled);}} onAlign={alignToConstruction}/>
+              <ConstructionControls coordinates={constructionCoordinates} selectedId={constructionId} plane={constructionPlane} frame={constructionInfo.frame} error={constructionInfo.error} gridStep={gridStep} snapStep={snapOverride} geometrySnap={geometrySnap} disabled={commandBusy || sourceRecoveryBlocked || Boolean(activeOperation)}
+                onCoordinate={id=>selectConstruction(id,constructionPlane)} onPlane={plane=>selectConstruction(constructionId,plane)}
+                onGridStep={step=>{cancelDragRef.current();setParameterDraft(null);setGridStep(step);}} onSnapStep={step=>{cancelDragRef.current();setParameterDraft(null);setSnapOverride(step);}}
+                onGeometrySnap={enabled=>{cancelDragRef.current();geometrySnapRef.current=enabled;setGeometrySnap(enabled);}} onAlign={alignToConstruction}/>
             </div>
             <div className="view-tools" aria-label="视口工具">
               <button onClick={() => void handleCommand("view.fit")} aria-label="适应窗口" title="适应窗口"><StudioIcon name="fit" /></button>
@@ -3263,7 +3278,7 @@ export default function CadDemo() {
               <span>{gridDragInstruction(dragPrimitive, dragStage)}</span>
               <div><button type="button" onClick={() => changeModelingMethod(false)} title="Alt+M，保留当前尺寸与位置">参数输入</button>{dragStage === "height" && <button type="button" onClick={() => reselectDragBaseRef.current()} title="Backspace，保留起点，重新绘制底面">重选底面</button>}<button type="button" onClick={exitDragModeling} title="Esc，取消当前绘制并退出拖拽建模">取消绘制</button></div>
             </div>}
-            <div className="viewport-hint">{dragModeling ? `${constructionInfo.error || gridDragInstruction(dragPrimitive, dragStage)} · ${constructionInfo.frame?.name || constructionId} XY · 网格 ${snapStep} mm${geometrySnap ? " · 几何吸附" : ""} · Alt+M 参数输入 · Esc 退出拖拽${dragPrimitive === "tube" ? " · 内半径默认外半径的 60%" : dragPrimitive === "prism" ? " · 默认六棱柱" : ["pyramid", "wedge"].includes(dragPrimitive) ? " · 顶部尺寸默认底部的 50%" : ""}` : "左键点选 / 框选 · 中键旋转 · Shift + 拖动平移 · 滚轮缩放"}</div>
+            <div className="viewport-hint">{dragModeling ? `${constructionInfo.error || gridDragInstruction(dragPrimitive, dragStage)} · ${constructionInfo.frame?.name || constructionId} ${constructionPlane} · 法向 ${CONSTRUCTION_AXES[constructionPlane][2]} · 网格 ${gridStep} mm · 吸附 ${snapStep} mm${geometrySnap ? " · 几何吸附" : ""} · Alt+M 参数输入 · Esc 退出拖拽${dragPrimitive === "tube" ? " · 内半径默认外半径的 60%" : dragPrimitive === "prism" ? " · 默认六棱柱" : ["pyramid", "wedge"].includes(dragPrimitive) ? " · 顶部尺寸默认底部的 50%" : ""}` : "左键点选 / 框选 · 中键旋转 · Shift + 拖动平移 · 滚轮缩放"}</div>
             {contextMenu && <div ref={viewportMenuRef} className="viewport-context-menu" role="menu" aria-label="视口操作" onPointerDown={(event) => event.stopPropagation()} onKeyDown={(event) => {
               const { key } = event;
               if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(key)) return;
@@ -3313,7 +3328,7 @@ export default function CadDemo() {
               <p>从 Ribbon 选择命令设置参数。</p>
             </div>}
           </CommandDock>
-          {agentOpen && <aside className="assistant-dock" aria-label="AI 建模助手"><div className="studio-pane-header"><strong>建模助手</strong><button aria-label="关闭 AI 助手" onClick={() => setAgentOpen(false)}><StudioIcon name="close" /></button></div><PiModelingAgentPanel revision={model?.revision ?? null} selection={selectedId && (selectedBodyId || model?.bodyId) ? { kind: selectionMode, bodyId: selectedBodyId || model?.bodyId || "", topologyId: selectionMode === "body" ? undefined : selectedId } : null} onCommitted={(result) => handleDirectModel(result as ModelData)} onOpenSettings={() => setActiveOperation("agentSettings")} /></aside>}
+          {agentOpen && <aside className="assistant-dock" aria-label="AI 建模助手"><div className="studio-pane-header"><strong>建模助手</strong><button aria-label="关闭 AI 助手" onClick={() => setAgentOpen(false)}><StudioIcon name="close" /></button></div><PiModelingAgentPanel revision={model?.revision ?? null} selection={selectedId && (selectedBodyId || model?.bodyId) ? { kind: selectionMode, bodyId: selectedBodyId || model?.bodyId || "", topologyId: selectionMode === "body" ? undefined : selectedId } : null} onCommitted={(result) => handleDirectModel(result as ModelData)} /></aside>}
         </aside>
       </section>
 

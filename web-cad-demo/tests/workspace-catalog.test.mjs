@@ -57,3 +57,29 @@ test('a damaged legacy property record makes only its own project unavailable, n
     assert.equal(items.length,2);assert.equal(items.find(item=>item.documentId==='good').recoverable,true);assert.equal(items.find(item=>item.documentId==='damaged').recoverable,false);assert.equal(items.find(item=>item.documentId==='damaged').token,null);assert.match(items.find(item=>item.documentId==='damaged').recoveryError,/属性数据损坏/);
   }finally{assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('a removed workspace stays out of recovery after catalog reload',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'cad-workspaces-'));
+  try{
+    const historyStore=new PersistentHistoryStore(root),propertySchemaStore=new PropertySchemaStore(root);
+    const options={dataDir:root,historyStore,propertySchemaStore};
+    const catalog=new WorkspaceCatalog(options);
+    const snapshot=historyStore.snapshotPath('removed');
+    fs.writeFileSync(snapshot,'BINFILE'+'x'.repeat(100));
+    historyStore.commit('removed',{current:snapshot,undo:[],redo:[]});
+    const previous=catalog.get('removed');
+    const current=catalog.rename('removed','Workspace to remove');
+    assert.throws(()=>catalog.remove('removed',previous),{code:'WORKSPACE_DELETE_CHANGED'});
+    catalog.remove('removed',current);
+    const reopened=new WorkspaceCatalog(options);
+    assert.equal(reopened.known('removed'),false);
+    assert.equal(reopened.list('removed').length,0);
+    assert.ok(fs.existsSync(snapshot));
+    assert.equal(reopened.known('default'),true);
+  }finally{
+    const resolved=path.resolve(root);
+    assert.equal(path.dirname(resolved),path.resolve(os.tmpdir()));
+    assert.match(path.basename(resolved),/^cad-workspaces-/);
+    fs.rmSync(resolved,{recursive:true,force:true});
+  }
+});

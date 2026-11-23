@@ -59,7 +59,7 @@ try{
     generation=(await request('/pi/sessions',{sessionId:'webcad-default',documentId:'default'})).streamId;
     await stop();await panel.locator('.pi-agent-status').filter({hasText:/离线|连接中/}).waitFor();await start();await online();
     const restored=await request('/pi/sessions',{sessionId:'webcad-default',documentId:'default'});assert.notEqual(restored.streamId,generation);
-    assert.equal(await composer.inputValue(),'未发送的建模草稿');await panel.getByText(/用户请求：fixture:pending/).waitFor();
+    assert.equal(await composer.inputValue(),'未发送的建模草稿');await panel.getByText('fixture:pending',{exact:true}).waitFor();
     assert.equal(log().filter(command=>command.type==='prompt'&&command.message.includes('fixture:pending')).length,1);
     assert.equal(log().some(command=>command.type==='prompt'&&command.message.includes('未发送的建模草稿')),false);
     await page.screenshot({path:path.join(artifacts,'gateway-recovered.png'),fullPage:true});
@@ -105,7 +105,7 @@ try{
     // Finish that flow before attributing reads to this next failed call.
     await page.waitForLoadState('networkidle');
     const stale=await summary();expected=await request('/commands',{documentId:'default',operation:'primitive.box',baseRevision:stale.revision,baseStateToken:stale.stateToken,parameters:{width:3,depth:4,height:5,x:80}});assert.equal(await page.getByTestId('feature-tree').locator('[data-body-id]').count(),stale.bodyCount);
-    const readsBefore=viewportReads;await send('fixture:failed-mutation');await panel.getByRole('button',{name:'停止',exact:true}).waitFor({state:'detached'});await page.waitForFunction(total=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===total,expected.bodyCount);assert.equal(viewportReads-readsBefore,1);assert.match(await panel.locator('.pi-agent-message.tool').last().locator('summary').innerText(),/失败/);await page.screenshot({path:path.join(artifacts,'unknown-mutation-reconciled.png'),fullPage:true});
+    const readsBefore=viewportReads;await send('fixture:failed-mutation');await panel.getByRole('button',{name:'停止',exact:true}).waitFor({state:'detached'});await page.waitForFunction(total=>document.querySelectorAll('[data-testid="feature-tree"] [data-body-id]').length===total,expected.bodyCount);assert.equal(viewportReads-readsBefore,1);assert.match(await panel.locator('.pi-agent-message.tool').last().locator('summary').innerText(),/结果待核对/);await page.screenshot({path:path.join(artifacts,'unknown-mutation-reconciled.png'),fullPage:true});
   });
   await check('large native results stay collapsed and lazy, synchronize without reconnecting, and still reconcile the actual CAD viewport once',async()=>{
     await page.waitForLoadState('networkidle');

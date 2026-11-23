@@ -21,6 +21,7 @@ type ProjectResult = {
 };
 import type { ModelingCommandInput } from "./modeling/command-contract";
 import {useEditorCommands} from "./modeling/CommandEditScope";
+import {constructionFrame} from "./modeling/construction-frame";
 import {FeatureReferenceRepair,failedSelectionTarget} from "./FeatureReferenceRepair";
 import type {FeatureRepairProposal} from "./modeling/feature-input";
 
@@ -34,7 +35,7 @@ function normalizeVariableExpression(type: ScalarVariableData["type"], expressio
 }
 
 function vector(value: string) {
-  const parts=value.split(",");
+  const parts=value.split(/[,，]/);
   const result = parts.map((item) => Number(item.trim()));
   if (result.length !== 3 || parts.some(item=>!item.trim()) || result.some((item) => !Number.isFinite(item))) {
     throw new Error("向量必须包含三个逗号分隔的数值。");
@@ -75,24 +76,28 @@ export function AdvancedProjectDataPanel({
   const initialMaterial = mode === "materials" && sourceId ? materials.find((item) => item.name === sourceId) : undefined;
   const initialCoordinate = mode === "coordinates" && sourceId ? coordinateSystems.find((item) => item.id === sourceId) : undefined;
   const isEditing = Boolean(initialItemId);
-  const isReadOnlyBuiltIn = !copyFromId && Boolean(initialMaterial?.builtIn || initialCoordinate?.builtIn);
+  const [coordinateEditingId,setCoordinateEditingId]=useState(copyFromId?"":initialCoordinate?.id || "");
+  const isReadOnlyBuiltIn = !copyFromId && Boolean(initialMaterial?.builtIn || coordinateSystems.find(item=>item.id===coordinateEditingId)?.builtIn);
   const initialCoordinateKind = initialCoordinate?.kind || "cartesian";
+  let nextCoordinateNumber = 1;
+  while (coordinateSystems.some(item => item.id === `local${nextCoordinateNumber}`)) nextCoordinateNumber++;
 
   const [name, setName] = useState(copyFromId && initialVariable ? uniqueName(initialVariable.name, variables.map((item) => item.name)) : initialVariable?.name || "width");
   const [type, setType] = useState<ScalarVariableData["type"]>(initialVariable?.type || "length");
   const [expression, setExpression] = useState(initialVariable?.expression || "100 mm");
-  const [coordinateId, setCoordinateId] = useState(copyFromId && initialCoordinate ? uniqueName(initialCoordinate.id, coordinateSystems.map((item) => item.id)) : initialCoordinate?.id || "local1");
-  const [coordinateName, setCoordinateName] = useState((initialCoordinate?.name || "Local1") + (copyFromId ? " 副本" : ""));
+  const [coordinateId, setCoordinateId] = useState(copyFromId && initialCoordinate ? uniqueName(initialCoordinate.id, coordinateSystems.map((item) => item.id)) : initialCoordinate?.id || `local${nextCoordinateNumber}`);
+  const [coordinateName, setCoordinateName] = useState((initialCoordinate?.name || `Local${nextCoordinateNumber}`) + (copyFromId ? " 副本" : ""));
   const [kind, setKind] = useState<CoordinateKind>(initialCoordinateKind);
   const [origin, setOrigin] = useState(initialCoordinate?.origin.join(", ") || "0, 0, 0");
   const [xAxis, setXAxis] = useState(initialCoordinate?.xAxis.join(", ") || "1, 0, 0");
   const [yAxis, setYAxis] = useState(initialCoordinate?.yAxis.join(", ") || "0, 1, 0");
   const [xPoint, setXPoint] = useState(initialCoordinate ? initialCoordinate.origin.map((value, index) => value + (initialCoordinate.xAxis[index] || 0)).join(", ") : "1, 0, 0");
   const [planePoint, setPlanePoint] = useState(initialCoordinate ? initialCoordinate.origin.map((value, index) => value + (initialCoordinate.yAxis[index] || 0)).join(", ") : "0, 1, 0");
+  const [defaultXPoint,setDefaultXPoint]=useState(!initialCoordinate);
+  const [defaultPlanePoint,setDefaultPlanePoint]=useState(!initialCoordinate);
   const [coordinateReference,setCoordinateReference]=useState(()=>({bodyId:initialCoordinate?.referenceBodyId || selectedBodyId || "",topologyId:initialCoordinate?.referenceTopologyId || (selectedTopologyId?.startsWith("face-")?selectedTopologyId:"")}));
   const [referenceChanged,setReferenceChanged]=useState(!initialCoordinate && Boolean(selectedTopologyId?.startsWith("face-")));
   const [associationMode,setAssociationMode]=useState<"snapshot"|"associative">(initialCoordinate?.associationMode || (initialCoordinateKind==="face"?"snapshot":"associative"));
-  const [coordinateEditingId,setCoordinateEditingId]=useState(copyFromId?"":initialCoordinate?.id || "");
   const loadedCoordinate=coordinateSystems.find(item=>item.id===coordinateId.trim() && item.kind==="face");
   const [materialName, setMaterialName] = useState(copyFromId && initialMaterial ? uniqueName(initialMaterial.name, materials.map((item) => item.name)) : initialMaterial?.name || "MyMaterial");
   const [materialCategory, setMaterialCategory] = useState<MaterialData["category"]>(initialMaterial?.category || "dielectric");
@@ -142,15 +147,22 @@ export function AdvancedProjectDataPanel({
     setBusy(true);
     setMessage(null);
     try {
-      const parameters: Record<string, unknown> = {
-        id: coordinateId.trim(),
-        name: coordinateName.trim(),
-        kind,
-        origin: vector(origin),
-        xAxis: vector(xAxis),
-        yAxis: vector(yAxis),
-      };
-      if (kind === "threePoint") Object.assign(parameters, { xPoint: vector(xPoint), planePoint: vector(planePoint) });
+      const id=coordinateId.trim(), name=coordinateName.trim();
+      const createOnly = coordinateEditingId !== id;
+      if (createOnly && (id==="global" || coordinateSystems.some(item=>item.id===id))) throw new Error("坐标系 ID 已存在，请使用新 ID，或从工程树打开已有坐标系进行编辑。");
+      const parameters: Record<string, unknown> = {id,name,kind,...(createOnly?{createOnly:true}:{})};
+      if (kind !== "face") {
+        const pivot=vector(origin);
+        if (kind === "threePoint") {
+          const x=vector(xPoint), y=vector(planePoint);
+          constructionFrame({id,name,origin:pivot,xAxis:x.map((value,index)=>value-pivot[index]),yAxis:y.map((value,index)=>value-pivot[index])});
+          Object.assign(parameters,{origin:pivot,xPoint:x,planePoint:y});
+        } else {
+          const x=vector(xAxis), y=vector(yAxis);
+          constructionFrame({id,name,origin:pivot,xAxis:x,yAxis:y});
+          Object.assign(parameters,{origin:pivot,xAxis:x,yAxis:y});
+        }
+      }
       if (kind === "face") {
         if(loadedCoordinate && coordinateEditingId===coordinateId.trim() && !referenceChanged)Object.assign(parameters,{preserveReference:true,associationMode});
         else if(copyFromId && initialCoordinate?.kind==="face" && !referenceChanged)Object.assign(parameters,{copyReferenceFrom:copyFromId,associationMode});
@@ -171,7 +183,7 @@ export function AdvancedProjectDataPanel({
       setMessage(`坐标系 ${coordinateName.trim()} 已保存并重算依赖特征。`);
     } catch (reason) {
       const failed=failedSelectionTarget(reason);if(failed && request)setRepairProposal({request,...failed});
-      setMessage(reason instanceof Error ? reason.message : "坐标系保存失败。");
+      setMessage((reason as {code?:string})?.code === "COORDINATE_SYSTEM_EXISTS" ? "坐标系 ID 已存在，请使用新 ID。" : reason instanceof Error ? reason.message : "坐标系保存失败。");
     } finally {
       setBusy(false);
     }
@@ -268,7 +280,16 @@ export function AdvancedProjectDataPanel({
       setXPoint(item.origin.map((value, index) => value + (item.xAxis?.[index] || 0)).join(", "));
       setPlanePoint(item.origin.map((value, index) => value + (item.yAxis?.[index] || 0)).join(", "));
     }
+    setDefaultXPoint(false);setDefaultPlanePoint(false);
     setMessage(null);
+  };
+  const changeCoordinateOrigin = (value: string) => {
+    setOrigin(value);
+    if (!defaultXPoint && !defaultPlanePoint) return;
+    let pivot: number[];
+    try { pivot = vector(value); } catch { return; }
+    if (defaultXPoint) setXPoint([pivot[0]+1,pivot[1],pivot[2]].join(", "));
+    if (defaultPlanePoint) setPlanePoint([pivot[0],pivot[1]+1,pivot[2]].join(", "));
   };
 
   if(repairProposal)return <section className="panel-section project-data-panel" data-testid={`project-data-${mode}`}><FeatureReferenceRepair proposal={repairProposal} onCancel={()=>{setRepairProposal(null);setMessage("已取消修复，工程未改变，原修改草稿保留。");}} onCommitted={result=>{setRepairProposal(null);onRevision(result as unknown as ProjectResult);setMessage("工程数据与引用修复已一起保存，可一次撤销。");}}/></section>;
@@ -345,9 +366,9 @@ export function AdvancedProjectDataPanel({
         <label><span>名称</span><input disabled={isReadOnlyBuiltIn} value={coordinateName} onChange={(event) => setCoordinateName(event.target.value)} /></label>
         <label><span>类型</span><select aria-label="坐标系类型" disabled={isReadOnlyBuiltIn} value={kind} onChange={(event) => setKind(event.target.value as CoordinateKind)}><option value="cartesian">Local Cartesian</option><option value="threePoint">Three-Point</option><option value="face">Face Reference</option></select></label>
       </div>
-      <label className="single-field"><span>原点 O</span><input disabled={isReadOnlyBuiltIn} readOnly={kind === "face"} value={origin} onChange={(event) => setOrigin(event.target.value)} /></label>
+      <label className="single-field"><span>原点 O</span><input disabled={isReadOnlyBuiltIn} readOnly={kind === "face"} value={origin} onChange={(event) => changeCoordinateOrigin(event.target.value)} /></label>
       {kind === "cartesian" && <div className="compact-fields"><label><span>X 轴方向</span><input disabled={isReadOnlyBuiltIn} value={xAxis} onChange={(event) => setXAxis(event.target.value)} /></label><label><span>Y 轴方向</span><input disabled={isReadOnlyBuiltIn} value={yAxis} onChange={(event) => setYAxis(event.target.value)} /></label></div>}
-      {kind === "threePoint" && <div className="compact-fields"><label><span>X 轴点</span><input disabled={isReadOnlyBuiltIn} value={xPoint} onChange={(event) => setXPoint(event.target.value)} /></label><label><span>XY 平面点</span><input disabled={isReadOnlyBuiltIn} value={planePoint} onChange={(event) => setPlanePoint(event.target.value)} /></label></div>}
+      {kind === "threePoint" && <div className="compact-fields"><label><span>X 轴点</span><input disabled={isReadOnlyBuiltIn} value={xPoint} onChange={(event) => {setDefaultXPoint(false);setXPoint(event.target.value);}} /></label><label><span>XY 平面点</span><input disabled={isReadOnlyBuiltIn} value={planePoint} onChange={(event) => {setDefaultPlanePoint(false);setPlanePoint(event.target.value);}} /></label></div>}
       {kind === "face" && <div className="coordinate-face-reference">
         <label className="single-field"><span>面关联方式</span><select aria-label="面关联方式" disabled={busy || isReadOnlyBuiltIn} value={associationMode} onChange={event=>setAssociationMode(event.target.value as "snapshot"|"associative")}><option value="associative">跟随来源面</option><option value="snapshot">固定坐标快照</option></select></label>
         {loadedCoordinate && !referenceChanged && <p className={`coordinate-reference-state${loadedCoordinate.referenceState==="unresolved"?" invalid":""}`} role="status">{loadedCoordinate.associationMode==="associative"?loadedCoordinate.referenceState==="resolved"?`关联有效 · 来源历史 ${loadedCoordinate.referenceFeatureId}`:`引用失效 · ${loadedCoordinate.referenceDiagnostic || "请重新选择来源面"}`:"固定快照 · 不自动跟随几何变化"}</p>}

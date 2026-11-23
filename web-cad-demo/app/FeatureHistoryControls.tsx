@@ -381,26 +381,28 @@ export function FeatureHistoryControls({
             <>
               {(selected.type==="pattern.rectangular" || selected.type==="pattern.mirror") && <p className="panel-copy" aria-label="阵列实例总数">当前实例总数：{selected.numberParameters.count ?? (selected.type==="pattern.mirror" ? 2 : selected.numberParameters.countX*selected.numberParameters.countY)}（{selected.type==="pattern.mirror" ? "镜像固定为原体和一个副本" : "由行数、列数决定"}，只读）</p>}
               <div className="feature-parameter-grid expression-parameter-grid">
-                {editableNumberEntries(selected).map(([key, value]) => (
-                  <label key={key}>
-                    <span>{key}</span>
-                    <div className="feature-expression-input">
-                      <input
-                        aria-label={"特征参数 " + key}
-                        list="feature-variable-options"
-                        value={draft[key] ?? parameterExpression(selected, key, value)}
-                        onFocus={() => setActiveParameterKey(key)}
-                        onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
-                        placeholder="数值、单位或变量表达式"
-                      />
-                      <em>= {value}</em>
-                    </div>
-                  </label>
-                ))}
+                {editableNumberEntries(selected).map(([key, value]) => {
+                  const savedExpression = parameterExpression(selected, key, value);
+                  const expression = draft[key] ?? savedExpression;
+                  const result = String(value);
+                  const showResult = expression === savedExpression && savedExpression !== result;
+                  return (
+                    <label key={key}>
+                      <span>{key}</span>
+                      <div className="feature-expression-input">
+                        <input
+                          aria-label={"特征参数 " + key}
+                          value={expression}
+                          onFocus={() => setActiveParameterKey(key)}
+                          onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))}
+                          placeholder="数值、单位或变量表达式"
+                        />
+                        {showResult && <em title={"已提交的计算值：" + result}>= {result}</em>}
+                      </div>
+                    </label>
+                  );
+                })}
               </div>
-              <datalist id="feature-variable-options">
-                {(model?.variables || []).map((variable) => <option key={variable.name} value={variable.name}>{variable.expression}</option>)}
-              </datalist>
               <div className="feature-variable-reference">
                 <span>工程变量</span>
                 {(model?.variables || []).length > 0

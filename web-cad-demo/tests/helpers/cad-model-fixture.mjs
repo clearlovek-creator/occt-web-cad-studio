@@ -30,7 +30,7 @@ export async function startCadModelFixture() {
                 parts.push(part);
             }
             const body = JSON.parse(Buffer.concat(parts));
-            assert.equal(body.model, 'sdk-fixture');
+            assert.equal(body.model, requests.length < 3 ? 'sdk-fixture' : 'sdk-fixture-vision');
             requests.push(body);
             const phase = requests.length;
             assert.ok(body.tools.some(tool => tool.function?.name === 'query_model'));
@@ -48,14 +48,21 @@ export async function startCadModelFixture() {
                 finish = 'tool_calls';
                 tools.push('primitive__box');
             }
-            else {
-                assert.equal(phase, 3, 'No repeated model or CAD command');
+            else if (phase === 3) {
                 assert.ok(body.messages.filter(message => message.role === 'tool').length >= 2);
                 delta = { role: 'assistant', content: 'The CAD tool confirmed one box.' };
                 finish = 'stop';
             }
+            else {
+                assert.equal(phase, 4, 'No repeated model or CAD command');
+                const user = body.messages.filter(message => message.role === 'user').at(-1);
+                assert.match(JSON.stringify(user.content), /SDK skill instructions marker/);
+                assert.ok(user.content.some(part => part.type === 'image_url' && /^data:image\/png;base64,/.test(part.image_url.url)));
+                delta = { role: 'assistant', content: 'The image and skill reached the model.' };
+                finish = 'stop';
+            }
             response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-            const chunk = (delta, reason) => ({ id: 'sdk-ui-' + phase, object: 'chat.completion.chunk', created: 1, model: 'sdk-fixture', choices: [{ index: 0, delta, finish_reason: reason }] });
+            const chunk = (delta, reason) => ({ id: 'sdk-ui-' + phase, object: 'chat.completion.chunk', created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason: reason }] });
             response.write('data: ' + JSON.stringify(chunk(delta, null)) + '\n\n');
             response.write('data: ' + JSON.stringify(chunk({}, finish)) + '\n\n');
             response.end('data: [DONE]\n\n');

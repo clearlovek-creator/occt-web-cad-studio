@@ -45,6 +45,30 @@ async function centroid(id,bodyId){return (await cad(id,'geometry.measure',{}, {
 const box={width:20,depth:30,height:10};
 const child={width:2,depth:4,height:6,coordinateSystemId:'attached'};
 
+test('new coordinates cannot overwrite an existing ID and principal planes follow a rotated frame on recompute',async()=>{
+  const id='coordinate_principal_planes';
+  const frame={id:'local1',name:'Rotated',origin:[10,20,30],xAxis:[0,2,0],yAxis:[0,1,3],createOnly:true};
+  const initial=await cad(id,'coordinate.set',frame);
+  const duplicate=await raw(id,'coordinate.set',{...frame,name:'Replacement'});
+  assert.equal(duplicate.code,'COORDINATE_SYSTEM_EXISTS',JSON.stringify(duplicate));
+  assert.equal((await cad(id,'document.view')).stateToken,initial.stateToken);
+  const placed=[];
+  for(const [coordinatePlane,expected] of [['XY',[17,26,41]],['XZ',[15,23,23]],['YZ',[15,27,33]]]){
+    const result=await cad(id,'primitive.box',{...child,coordinateSystemId:frame.id,coordinatePlane,x:2,y:3,z:4});
+    assert.equal(result.features.at(-1).stringParameters.coordinatePlane,coordinatePlane);
+    near(await centroid(id,result.bodyId),expected);
+    placed.push({bodyId:result.bodyId,expected});
+  }
+  const before=await cad(id,'document.view');
+  const invalid=await raw(id,'primitive.box',{...child,coordinateSystemId:frame.id,coordinatePlane:'YX'});
+  assert.equal(invalid.code,'INVALID_CONSTRUCTION_PLANE');
+  assert.equal((await cad(id,'document.view')).stateToken,before.stateToken);
+  await cad(id,'coordinate.set',{...frame,createOnly:false,origin:[22,13,34]});
+  for(const {bodyId,expected} of placed)near(await centroid(id,bodyId),expected.map((value,i)=>value+[12,-7,4][i]));
+  await cad(id,'document.undo');
+  for(const {bodyId,expected} of placed)near(await centroid(id,bodyId),expected);
+});
+
 test('a persistent face frame and a two-level geometry/coordinate chain follow upstream parameters atomically',async()=>{
   const id='coordinate_chain',base=await cad(id,'primitive.box',box),source=base.features[0].id;
   const initial=await attach(id,base);near(coordinate(initial).origin,[10,15,10]);assert.equal(coordinate(initial).associationMode,'associative');assert.equal(coordinate(initial).referenceState,'resolved');

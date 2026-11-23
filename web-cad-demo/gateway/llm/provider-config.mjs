@@ -25,7 +25,7 @@ export function normalizeProvider(input = {}) {
   const priority = Number.isFinite(Number(input.priority)) ? Math.max(0, Math.min(100, Math.trunc(Number(input.priority)))) : 0;
   const toolCalling = true;
   const capabilities = { toolCalling: true, verified: input.capabilities?.verified === true, protocol: protocol === "auto" ? null : protocol, ...(input.capabilities && typeof input.capabilities === "object" ? input.capabilities : {}) };
-  return { id, name, baseUrl, model, protocol, priority, toolCalling, capabilities, enabled: input.enabled !== false, createdAt: input.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+  return { id, name, baseUrl, model, protocol, priority, toolCalling, capabilities, supportsImages: input.supportsImages === true, enabled: input.enabled !== false, createdAt: input.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
 }
 
 export function assertProviderUrl(baseUrl, { allowPrivate = process.env.AGENT_ALLOW_PRIVATE_URL === "true" } = {}) {
@@ -80,7 +80,7 @@ export class ProviderStore {
   get(id) { return this.read().find((item) => item.id === id); }
   save(input) {
     const existing = this.get(input.id);
-    const normalized = normalizeProvider(input);
+    const normalized = normalizeProvider({ ...input, supportsImages: input.supportsImages ?? existing?.supportsImages });
     const apiKey = input.apiKey === undefined || input.apiKey === "" ? existing?.apiKey || "" : String(input.apiKey).trim();
     if (apiKey.length > 4096) throw new Error("Provider API key is too long.");
     const provider = { ...normalized, apiKey };
