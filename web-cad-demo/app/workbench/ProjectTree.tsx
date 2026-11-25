@@ -19,7 +19,7 @@ function Branch({ label, actions, children, icon, onEdit, searching = false, hid
     </button></ContextActions>{open && children && <ul role="group" className="managed-tree-branch">{children}</ul>}</li>;
 }
 
-export function ProjectTree({ projectName, variables, materials, coordinates, types, instances, stateToken, features = [], bodies = [], busy, error, onEditData, onDeleteData, onEditType, onEditInstance, onSelectTarget, onSelectTargets, onError, query, onQuery, onHide, geometry }: {
+export function ProjectTree({ projectName, variables, materials, coordinates, types, instances, stateToken, features = [], bodies = [], busy, error, onEditData, onDeleteData, onEditType, onEditInstance, onSelectTarget, onSelectTargets, onError, query, onQuery, onHide, geometry, onOpenMesh, onOpenSimulation }: {
   variables: ScalarVariableData[]; materials: MaterialData[]; coordinates: CoordinateSystemData[]; types: PropertyType[]; instances: PropertyInstance[]; busy: boolean; error?: string | null;
   features?: FeatureData[]; bodies?: { bodyId: string; name: string; material: string }[];
   projectName?: string;
@@ -35,6 +35,8 @@ export function ProjectTree({ projectName, variables, materials, coordinates, ty
   onQuery: (value: string) => void;
   onHide: () => void;
   geometry: ReactNode;
+  onOpenMesh: () => void;
+  onOpenSimulation: () => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const search = query.trim().toLocaleLowerCase();
@@ -58,7 +60,9 @@ export function ProjectTree({ projectName, variables, materials, coordinates, ty
       if (mode === "variables") {
         variables.filter((variable) => variable.name !== id && mentions(variable.expression)).forEach((variable) => entries.push(`变量 · ${variable.name}`));
         materials.forEach((material) => Object.entries(material.customProperties || {}).forEach(([key, property]) => { if (property.expression && mentions(property.expression)) entries.push(`材料 · ${material.name}.${key}`); }));
-        instances.filter((instance) => Object.values(instance.value).some((value) => typeof value === "string" && mentions(value))).forEach((instance) => entries.push(`属性实例 · ${instance.name}`));
+        const referencesVariable = (value: unknown) => (Array.isArray(value) ? value : [value]).some(part => typeof part === "string" && mentions(part));
+        types.forEach(type => type.fields.filter(field => ["expression", "vector3"].includes(field.type) && referencesVariable(field.default)).forEach(field => entries.push(`属性类型 · ${type.name}.${field.label} 默认值`)));
+        instances.filter(instance => Object.values(instance.value).some(referencesVariable)).forEach(instance => entries.push(`属性实例 · ${instance.name}`));
       }
     }
     setReferences({ name: id, entries });
@@ -96,6 +100,16 @@ export function ProjectTree({ projectName, variables, materials, coordinates, ty
             { label: "删除实例", danger: true, disabled: busy || !stateToken, run: () => safe(() => schemaCommand("property.instance.delete", { instanceId: instance.instanceId },{},stateToken)) },
           ]}><button className={`managed-tree-label managed-record${instance.state !== "active" ? " invalid" : ""}`} title={instance.stateReason || "单击定位几何，双击修改实例"} onClick={() => { if (instance.state !== "active") { onSelectTargets?.([]); onEditInstance(type.typeId, instance.instanceId); } else if (instanceTargets(instance).length) locateInstance(instance); }} onDoubleClick={() => onEditInstance(type.typeId, instance.instanceId)} onKeyDown={(event) => { if (event.key === "Enter") onEditInstance(type.typeId, instance.instanceId); }}><span className="managed-record-dot">◇</span><span><strong>{instance.name}</strong><small>{instance.state !== "active" ? `${instance.state === "orphaned" ? "关联已失效" : "关联待复核"} · ` : ""}{Array.isArray(instance.targets) ? `关联集合 · ${instance.targets.length} 项` : instance.target ? `${instance.target.kind} · ${instance.target.topologyId || instance.target.bodyId}` : "工程属性"}</small></span></button></ContextActions></li>) : <li className="managed-tree-empty">右键类型 → 新增实例</li>}</Branch>;
         }) : null}</Branch>
+        <li role="treeitem" aria-selected={false} hidden={!matches("网格管理", "网格工作台", "网格剖分")}>
+          <div className="managed-tree-row">
+            <button type="button" className="managed-tree-label" onClick={onOpenMesh}>
+              <span className="tree-toggle" aria-hidden="true" /><StudioIcon name="referenceGrid" size={14} /><strong>网格管理</strong>
+            </button>
+          </div>
+        </li>
+        <Branch label="仿真管理" icon="settings" searching={Boolean(search)} initiallyExpanded={false} actions={[{ label: "查看求解器状态", run: onOpenSimulation }]}>
+          <li role="treeitem" aria-selected={false} hidden={!matches("仿真", "求解器", "求解器未接入")}><button type="button" className="managed-tree-label managed-record" onClick={onOpenSimulation}><StudioIcon name="settings" size={14} /><span><strong>求解器状态</strong><small>未接入</small></span></button></li>
+        </Branch>
       </ul>}
     </li></ul>{references && <section className="tree-references" aria-label="引用信息"><div><strong>{references.name} · 引用</strong><button aria-label="关闭引用信息" onClick={() => setReferences(null)}>×</button></div>{references.entries.length ? <ul>{references.entries.map((entry) => <li key={entry}>{entry}</li>)}</ul> : <p>当前工程数据中没有发现引用。删除时仍由几何服务检查依赖关系。</p>}</section>}{error && <p className="tree-error" role="alert">{error}</p>}
     </div></section>;

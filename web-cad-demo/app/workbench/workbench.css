@@ -449,15 +449,16 @@ html, body { background: var(--cad-bg); color: var(--cad-text); font: 12px "Sego
 .cad-shell .boolean-input-icon { color: var(--cad-accent); background: #e1eafa; border-color: #b6cee5; }
 .cad-shell .center-stage { grid-template-rows: auto minmax(0, 1fr) minmax(0, auto) 34px; }
 .viewport-toolbar { min-width: 0; background: var(--cad-chrome); display: grid; grid-template-columns: minmax(0, 1fr) auto; }
-.construction-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 36px; padding: 4px 8px; border-top: 1px solid var(--cad-border-soft); }
-.construction-controls label { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--cad-text-2); font-size: 12px; }
-.construction-controls select { max-width: 200px; height: 28px; }
-.construction-controls button { min-height: 30px; padding: 4px 12px; border: 1px solid var(--cad-border); border-radius: 2px; background: var(--cad-surface-2); color: var(--cad-accent); cursor: pointer; }
+.construction-controls label { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 8px; color: var(--cad-text-2); font-size: 12px; }
+.construction-controls select { min-width: 0; width: 100%; height: 28px; }
+.construction-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.construction-controls button { width: auto; min-height: 30px; padding: 4px; border: 1px solid var(--cad-border); border-radius: 2px; background: var(--cad-surface-2); color: var(--cad-accent); cursor: pointer; }
 .construction-controls button:hover:not(:disabled) { background: var(--cad-surface-3); }
 .construction-controls button:focus-visible { outline: 2px solid var(--cad-accent); outline-offset: 2px; }
 .construction-controls button:disabled { opacity: .55; cursor: not-allowed; }
 .construction-controls small { color: var(--cad-text-3); font-size: 11px; }
 .construction-frame-warning { color: var(--cad-danger); font-size: 12px; }
+.construction-error { margin: 0; font-size: 12px; color: var(--cad-danger); overflow-wrap: anywhere; }
 .coordinate-reference-state { margin: 8px 0; padding: 8px; border-left: 3px solid var(--cad-accent); background: var(--cad-inset); color: var(--cad-text-2); font-size: 12px; overflow-wrap: anywhere; }
 .coordinate-reference-state.invalid { border-color: var(--cad-danger); color: var(--cad-danger); }
 .coordinate-editor-actions { position: sticky; bottom: 0; z-index: 2; background: var(--cad-surface); border-top: 1px solid var(--cad-border-soft); padding-top: 8px; }
@@ -808,6 +809,11 @@ html, body { background: var(--cad-bg); color: var(--cad-text); font: 12px "Sego
 .schema-value-field strong { font-size: 12px; font-weight: 500; }
 .schema-value-field code { margin-top: 2px; font-size: 10px; color: var(--cad-text-3); }
 .schema-value-field input[type="checkbox"] { justify-self: start; width: 16px; height: 16px; }
+.schema-vector-input { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.schema-vector-input input { flex: 1 1 7rem; min-width: 0; }
+.schema-vector-input button { white-space: nowrap; }
+.schema-vector-input small { flex-basis: 100%; color: var(--cad-text-2); overflow-wrap: anywhere; }
+.schema-vector-input [role="alert"] { color: var(--cad-danger); }
 .schema-association { min-width: 0; padding: 8px; border: 1px solid var(--cad-border); border-radius: 2px; }
 .schema-association legend { padding: 0 4px; font-size: 11px; color: var(--cad-text-2); }
 .property-association-review { margin: 12px 0; padding: 12px; border-left: 3px solid var(--cad-warning); background: var(--cad-surface-2); color: var(--cad-text-2); font-size: 12px; line-height: 1.5; }

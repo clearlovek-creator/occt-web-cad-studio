@@ -37,7 +37,7 @@ test("portable project preserves typed instances and STEP replay across gateways
     await command(aPort,"portable","coordinate.set",{id:"local_cn",name:"本地坐标系",kind:"cartesian",origin:[1,2,3],xAxis:[1,0,0],yAxis:[0,1,0]});
     const type=await command(aPort,"portable","property.type.create",{key:"Setup",fields:[{key:"frequency",type:"double"},{key:"enabled",type:"bool"},{key:"modes",type:"int"},{key:"offset",type:"expression"},{key:"axis",type:"vector3"},{key:"kind",type:"enum",options:["A","B"]}]});
     const renamed=await request(aPort,"/projects/portable",{name:"便携工程 中文"});assert.equal(renamed.payload.ok,true);
-    const value={frequency:3,enabled:true,modes:2,offset:"shift / 2",axis:[1,0,0],kind:"A"};
+    const value={frequency:3,enabled:true,modes:2,offset:"shift / 2",axis:["shift / 2","max(2, 3)",1],kind:"A"};
     const instance=await command(aPort,"portable","property.instance.create",{typeId:type.type.typeId,name:"Setup 1",value});
     const portType=await command(aPort,"portable","property.type.create",{key:"WavePort",targetScope:"face",association:"required",fields:[{key:"mode",type:"int"}]});
     const presentation=await command(aPort,"portable","body.presentation",{}, {bodyId:transformed.bodyId});
@@ -67,12 +67,17 @@ test("portable project preserves typed instances and STEP replay across gateways
     const workspace=await (await fetch(`http://127.0.0.1:${bPort}/api/projects/destination`)).json();assert.equal(workspace.project.name,"便携工程 中文");assert.equal(workspace.project.hasChangesSinceExport,false);
     assert.equal(opened.payload.bodyMetadata.find(item=>item.bodyId===transformed.bodyId || item.id===transformed.bodyId).name,"基板 中文");
     assert.equal(opened.payload.coordinateSystems.find(item=>item.id==="local_cn").name,"本地坐标系");
-    assert.equal(opened.payload.propertySchema.instances.find(item=>item.instanceId===instance.instance.instanceId).value.frequency,3);
+    assert.deepEqual(opened.payload.propertySchema.instances.find(item=>item.instanceId===instance.instance.instanceId).value,value);
+    const vectorBefore=await command(bPort,"destination","property.vector.preview",{value:value.axis});
+    assert.deepEqual(vectorBefore.vectorValue,[2,3,1]);
     assert.deepEqual(opened.payload.propertySchema.instances.find(item=>item.instanceId===faceInstance.instance.instanceId).target,faceInstance.instance.target);
     assert.equal(opened.payload.propertySchema.types.some(item=>item.key==="DiscardMe"),false);
     await stop(a);a=null;assert.ok(path.resolve(originalPath).startsWith(path.resolve(aDir)+path.sep));fs.rmSync(originalPath);
     await command(bPort,"destination","variable.set",{name:"shift",type:"length",expression:"9 mm"});
     const before=await command(bPort,"destination","document.view");const rebound=before.features.find(feature=>feature.type==="import.step").stringParameters.sourcePath;
+    const vectorAfter=await command(bPort,"destination","property.vector.preview",{value:value.axis});
+    assert.deepEqual(vectorAfter.vectorValue,[4.5,3,1]);
+    assert.equal(vectorAfter.stateToken,before.stateToken);
     assert.ok(path.resolve(rebound).startsWith(path.resolve(bDir,"project-assets")+path.sep));assert.ok(fs.existsSync(rebound));
     const checkUnchanged=async()=>{const view=await command(bPort,"destination","document.view");assert.equal(view.revision,before.revision);assert.equal(view.bodyCount,before.bodyCount);const schema=await command(bPort,"destination","property.instance.list");assert.deepEqual(schema.instances.find(item=>item.instanceId===instance.instance.instanceId).value,value);};
     const damaged=Buffer.from(bytes);damaged[15]^=1;const bad=await request(bPort,"/documents/destination/project/open",damaged,PROJECT_MIME);assert.equal(bad.payload.ok,false);await checkUnchanged();

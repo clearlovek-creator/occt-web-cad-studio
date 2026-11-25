@@ -12,13 +12,13 @@ export type PropertyInstance = { instanceId: string; typeId: string; typeKey: st
 export type PropertySchema = { schemaVersion?:1|2;types: PropertyType[]; instances: PropertyInstance[]; stateToken?: string; stateSequence?:number };
 export const instanceTargets=(instance:Pick<PropertyInstance,'target'|'targets'>|undefined):NonNullable<PropertyTarget>[]=>instance?.targets || (instance?.target?[instance.target]:[]);
 export type PropertyMigration = {type:PropertyType;instanceCount:number;addedFields:PropertyField[];changed:boolean;examples:Array<{instanceId:string;name:string;addedValues:Record<string,unknown>}>};
-export type SchemaResult = { ok: true; documentId?:string;revision?:number;stateSequence?:number;stateToken?: string; migration?:PropertyMigration; type?: PropertyType; instance?: PropertyInstance; types?: PropertyType[]; instances?: PropertyInstance[]; propertySchema?: PropertySchema; package?: unknown; error?: string };
+export type SchemaResult = { ok: true; documentId?:string;revision?:number;stateSequence?:number;stateToken?: string; migration?:PropertyMigration; type?: PropertyType; instance?: PropertyInstance; types?: PropertyType[]; instances?: PropertyInstance[]; propertySchema?: PropertySchema; package?: unknown; vectorValue?: number[]; error?: string };
 const CHANGED = "cad:property-schema-changed";
 export async function schemaCommand(operation: string, inputs: Record<string, unknown> = {}, parameters: Record<string, unknown> = {}, baseStateToken?: string) {
   let result:SchemaResult;
   try{result = await executeModelingCommand<SchemaResult>({ operation, inputs, parameters, ...(baseStateToken?{baseStateToken}:{}) });}
   catch(reason){if((reason as {code?:string})?.code==="PROJECT_STATE_CONFLICT")window.dispatchEvent(new Event(CHANGED));throw reason;}
-  if (!operation.endsWith(".list") && operation !== "property.package.export" && operation !== "property.type.preview") window.dispatchEvent(new Event(CHANGED));
+  if (!operation.endsWith(".list") && operation !== "property.package.export" && !operation.endsWith(".preview")) window.dispatchEvent(new Event(CHANGED));
   return result;
 }
 export function usePropertySchema(revision?: number, documentId?: string) {

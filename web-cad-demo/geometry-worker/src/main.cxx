@@ -134,6 +134,7 @@ std::string dispatch(DocumentManager& manager, const JsonValue& request,const Na
   if (operation == "body.update")
     return document.UpdateBody(requestId, request.GetInteger("baseRevision"),
                                inputs.GetString("bodyId"), parameters);
+  if (operation == "property.vector.preview") return document.PreviewPropertyVector(requestId, parameters);
   if (operation == "variable.set")
     return document.SetVariable(requestId, request.GetInteger("baseRevision"), parameters);
   if (operation == "variable.delete")

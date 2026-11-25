@@ -1,6 +1,7 @@
 #include "ShapeSerializer.hxx"
 
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
@@ -19,6 +20,7 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -36,6 +38,40 @@ void writePoint(std::ostream& out, const gp_Pnt& point)
 void writeVector(std::ostream& out, const gp_Vec& vector)
 {
   out << vector.X() << ',' << vector.Y() << ',' << vector.Z();
+}
+
+void writeEdgePoints(std::ostream& out, const TopoDS_Edge& edge, const BRepAdaptor_Curve& curve,
+                     const double first, const double last, const std::size_t fixedSamples)
+{
+  const bool line = curve.GetType() == GeomAbs_Line;
+  if (!line && fixedSamples == 0)
+  {
+    Handle(Poly_PolygonOnTriangulation) polygon;
+    Handle(Poly_Triangulation) triangulation;
+    TopLoc_Location location;
+    BRep_Tool::PolygonOnTriangulation(edge, polygon, triangulation, location);
+    if (!polygon.IsNull() && !triangulation.IsNull() && triangulation->HasGeometry() && polygon->NbNodes() >= 2)
+    {
+      // Use the same boundary as the shaded faces so depth testing and edge picking agree.
+      const int segments = polygon->NbNodes() - 1;
+      const int samples = std::min(segments, 256);
+      const gp_Trsf transform = location.Transformation();
+      for (int sample = 0; sample <= samples; ++sample)
+      {
+        if (sample != 0) out << ',';
+        const int index = static_cast<int>(static_cast<long long>(sample) * segments / samples) + 1;
+        writePoint(out, triangulation->Node(polygon->Node(index)).Transformed(transform));
+      }
+      return;
+    }
+  }
+
+  const int samples = line ? 2 : static_cast<int>(std::clamp<std::size_t>(fixedSamples ? fixedSamples : 65, 2, 32768));
+  for (int sample = 0; sample < samples; ++sample)
+  {
+    if (sample != 0) out << ',';
+    writePoint(out, curve.Value(first + (last - first) * sample / (samples - 1.0)));
+  }
 }
 
 std::optional<gp_Pnt> curveMidpoint(const BRepAdaptor_Curve& curve, const double first, const double last)
@@ -104,15 +140,15 @@ std::size_t environmentSize(const char* name, const std::size_t fallback)
 occweb::ShapeSerializationLimits resolveLimits(occweb::ShapeSerializationLimits limits)
 {
   if (limits.linearDeflection <= 0.0)
-    limits.linearDeflection = environmentDouble("OCCT_WEB_MESH_LINEAR_DEFLECTION", 0.35);
+    limits.linearDeflection = environmentDouble("OCCT_WEB_MESH_LINEAR_DEFLECTION", 0.12);
   if (limits.angularDeflection <= 0.0)
-    limits.angularDeflection = environmentDouble("OCCT_WEB_MESH_ANGULAR_DEFLECTION", 0.25);
+    limits.angularDeflection = environmentDouble("OCCT_WEB_MESH_ANGULAR_DEFLECTION", 0.12);
   if (limits.maxTriangles == 0)
     limits.maxTriangles = environmentSize("OCCT_WEB_MAX_TRIANGLES", 250000);
   if (limits.maxEdges == 0)
     limits.maxEdges = environmentSize("OCCT_WEB_MAX_EDGES", 20000);
   if (limits.edgeSamples == 0)
-    limits.edgeSamples = environmentSize("OCCT_WEB_EDGE_SAMPLES", 25);
+    limits.edgeSamples = environmentSize("OCCT_WEB_EDGE_SAMPLES", 0);
   return limits;
 }
 }
@@ -162,7 +198,6 @@ std::string ShapeSerializer::Serialize(const std::string& prefix) const
 std::string ShapeSerializer::SerializeBody() const
 {
   BRepMesh_IncrementalMesh mesher(myShape, myLimits.linearDeflection, false, myLimits.angularDeflection, true);
-  mesher.Perform();
   if (!mesher.IsDone()) throw std::runtime_error("OCCT meshing failed.");
 
   std::ostringstream positions, normals, indices, triangleFaceIds;
@@ -179,6 +214,8 @@ std::string ShapeSerializer::SerializeBody() const
     const Handle(Poly_Triangulation) triangulation = BRep_Tool::Triangulation(face, location);
     if (triangulation.IsNull() || !triangulation->HasGeometry()) continue;
     const gp_Trsf transform = location.Transformation();
+    BRepLib_ToolTriangulatedShape::ComputeNormals(face, triangulation);
+    const bool reversed = face.Orientation() == TopAbs_REVERSED;
     for (int triangleIndex = 1; triangleIndex <= triangulation->NbTriangles(); ++triangleIndex)
     {
       if (static_cast<std::size_t>(triangleCount) >= myLimits.maxTriangles)
@@ -187,7 +224,7 @@ std::string ShapeSerializer::SerializeBody() const
         break;
       }
       int node1 = 0, node2 = 0, node3 = 0;
-      if (face.Orientation() == TopAbs_REVERSED)
+      if (reversed)
         triangulation->Triangle(triangleIndex).Get(node1, node3, node2);
       else
         triangulation->Triangle(triangleIndex).Get(node1, node2, node3);
@@ -197,12 +234,20 @@ std::string ShapeSerializer::SerializeBody() const
       gp_Vec normal = gp_Vec(points[0], points[1]).Crossed(gp_Vec(points[0], points[2]));
       if (normal.SquareMagnitude() <= 1.0e-18) continue;
       normal.Normalize();
-      for (const gp_Pnt& point : points)
+      const int nodes[] = {node1, node2, node3};
+      for (int vertex = 0; vertex < 3; ++vertex)
       {
         if (!firstPosition) positions << ',';
-        writePoint(positions, point); firstPosition = false;
+        writePoint(positions, points[vertex]); firstPosition = false;
         if (!firstNormal) normals << ',';
-        writeVector(normals, normal); firstNormal = false;
+        gp_Vec vertexNormal = normal;
+        if (triangulation->HasNormals())
+        {
+          vertexNormal = gp_Vec(triangulation->Normal(nodes[vertex]));
+          if (reversed) vertexNormal.Reverse();
+          if (!location.IsIdentity()) vertexNormal.Transform(transform);
+        }
+        writeVector(normals, vertexNormal); firstNormal = false;
         if (!firstIndex) indices << ',';
         indices << vertexIndex++; firstIndex = false;
       }
@@ -229,14 +274,9 @@ std::string ShapeSerializer::SerializeBody() const
     BRepAdaptor_Curve curve(edge);
     const double first = curve.FirstParameter(), last = curve.LastParameter();
     if (!std::isfinite(first) || !std::isfinite(last) || last <= first) continue;
-    const int samples = curve.GetType() == GeomAbs_Line ? 2 : static_cast<int>(myLimits.edgeSamples);
     if (!firstEdge) edges << ',';
     edges << "{\"edgeId\":\"" << edgeId(edgeIndex) << "\",\"points\":[";
-    for (int sample = 0; sample < samples; ++sample)
-    {
-      if (sample > 0) edges << ',';
-      writePoint(edges, curve.Value(first + (last - first) * sample / (samples - 1.0)));
-    }
+    writeEdgePoints(edges, edge, curve, first, last, myLimits.edgeSamples);
     edges << ']';
     writeSnapPoints(edges, edge, curve, first, last);
     edges << '}'; firstEdge = false;

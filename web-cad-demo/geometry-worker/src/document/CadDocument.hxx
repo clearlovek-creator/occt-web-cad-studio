@@ -114,6 +114,7 @@ public:
                          const std::string& bodyId);
   std::string UpdateBody(const std::string& requestId, int expectedRevision,
                          const std::string& bodyId, const JsonValue& parameters);
+  std::string PreviewPropertyVector(const std::string& requestId, const JsonValue& parameters) const;
   std::string SetVariable(const std::string& requestId, int expectedRevision,
                           const JsonValue& parameters, const HistoricalInputTarget& inspectionTarget = {});
   std::string DeleteVariable(const std::string& requestId, int expectedRevision,

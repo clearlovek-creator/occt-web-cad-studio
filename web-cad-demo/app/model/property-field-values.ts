@@ -1,4 +1,5 @@
 import type { PropertyField } from "./property-schema";
+import { isPropertyVector, splitPropertyVector } from "../../shared/property-vector.mjs";
 
 /** Convert editor text once, without rounding exact integers or blank vectors. */
 export function parsePropertyValue(field: PropertyField, raw: unknown): unknown {
@@ -14,9 +15,9 @@ export function parsePropertyValue(field: PropertyField, raw: unknown): unknown 
   }
   if(field.type==="double")return (typeof raw==="number" || typeof raw==="string") && Number.isFinite(Number(raw))?Number(raw):fail("必须是有限数值。");
   if(field.type==="vector3"){
-    const parts=Array.isArray(raw)?raw:typeof raw==="string"?raw.split(","):[];
-    if(parts.length!==3 || parts.some(entry=>(typeof entry!=="number" && typeof entry!=="string") || String(entry).trim()==="" || !Number.isFinite(Number(entry))))return fail("必须包含三个非空数值，例如 0, 0, 1。");
-    return parts.map(Number);
+    const parts = typeof raw === "string" ? splitPropertyVector(raw).map(part => part.trim()) : raw;
+    if (!isPropertyVector(parts)) return fail("必须包含三个非空分量，例如 width / 2, max(2, 3), 1。");
+    return parts.map(part => Number.isFinite(Number(part)) ? Number(part) : String(part).trim());
   }
   if(field.type==="enum")return typeof raw==="string" && field.options?.includes(raw)?raw:fail("必须使用已定义的枚举选项。");
   return typeof raw==="string"?raw:fail("必须是表达式文本。");

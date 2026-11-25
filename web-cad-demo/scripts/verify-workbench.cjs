@@ -29,9 +29,9 @@ let browser, page;
 let diagnostics = '';
 let revision = 0;
 gateway.stderr.on('data', (chunk) => { diagnostics += chunk; });
-async function command(operation, parameters = {}, inputs = {}) {
+async function command(operation, parameters = {}, inputs = {}, baseStateToken) {
   const documentId = page ? (await page.locator('main.cad-shell').getAttribute('data-document-id')) || 'default' : 'default';
-  const response = await fetch(api + '/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(observedClient.prepare({ operation, documentId, baseRevision: revision, parameters, inputs })) });
+  const response = await fetch(api + '/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(observedClient.prepare({ operation, documentId, baseRevision: revision, baseStateToken, parameters, inputs })) });
   const result = await response.json(); observedClient.observe(result,documentId);assert.equal(result.ok, true, JSON.stringify(result)); if (Number.isInteger(result.revision)) revision = result.revision; return result;
 }
 async function check(name, fn) { await fn(); passed.push(name); process.stdout.write(`PASS ${name}\n`); }
@@ -76,6 +76,7 @@ async function assertModelVisible() {
     const project = page.getByTestId('project-tree');
     const geometry = page.getByTestId('feature-tree');
     const close = async () => { const button = page.getByRole('button', { name: '关闭操作窗口', exact: true }); if (await button.count()) await button.click(); };
+    const construction = page.getByRole('button', { name:'构造设置', exact:true });
     await check('one-line viewport controls and a usable narrow viewport with the assistant', async () => {
       await page.setViewportSize({ width: 1600, height: 960 });
       const centerY = async (locator) => { const r = await locator.boundingBox(); assert.ok(r); return r.y + r.height / 2; };
@@ -85,16 +86,31 @@ async function assertModelVisible() {
       const snap = page.getByRole('button', { name:'几何吸附', exact:true });
       const settings = page.getByRole('button', { name:'面板设置', exact:true });
       const y = await centerY(projection);
-      for (const control of [frame, step, snap, settings]) assert.ok(Math.abs(await centerY(control) - y) < 3);
+      for (const control of [construction, settings]) assert.ok(Math.abs(await centerY(control) - y) < 3);
+      const toolbar = page.locator('.viewport-toolbar');
+      const height = (await toolbar.boundingBox()).height;
+      assert.ok(await page.locator('.view-tabs').evaluate(el => el.scrollWidth === el.clientWidth));
+      assert.equal(await frame.count(), 0);
+      await construction.click();
+      assert.equal((await toolbar.boundingBox()).height, height);
+      assert.equal(await frame.inputValue(), 'global');
+      assert.equal(await step.inputValue(), 'grid');
+      assert.equal(await snap.getAttribute('aria-pressed'), 'true');
+      await frame.focus();
+      await page.keyboard.press('Escape');
+      assert.equal(await construction.getAttribute('aria-expanded'), 'false');
+      assert.ok(await construction.evaluate(el => el === document.activeElement));
       await page.setViewportSize({ width: 390, height: 760 });
       const assistant = page.getByRole('button', { name:'AI 助手', exact:true });
       await page.route('**/api/pi/sessions**', route => route.fulfill({ status:503, json:{ok:false,error:'fixture'} }));
       await assistant.click();
       const screen = await page.getByTestId('cad-viewport').boundingBox();
       assert.ok(screen.height >= 255, `narrow viewport height = ${screen.height}px`);
-      await step.scrollIntoViewIfNeeded();
-      assert.ok(await page.locator('.view-tabs').evaluate(el => el.scrollLeft > 0));
+      await construction.click();
+      const popover = await page.getByRole('group', { name:'构造平面设置', exact:true }).boundingBox();
+      assert.ok(popover.x >= 0 && popover.x + popover.width <= 390);
       await settings.click();
+      assert.equal(await construction.getAttribute('aria-expanded'), 'false');
       await page.getByRole('button', { name:'恢复全部面板', exact:true }).click();
       await page.unroute('**/api/pi/sessions**');
       await page.setViewportSize({ width: 1440, height: 960 });
@@ -121,7 +137,7 @@ async function assertModelVisible() {
     await check('handoff ribbon categories, single-row tools and ordered project tree', async () => {
       const tabs = ['工程','建模','变换','布尔','特征','网格','检查','修复','分析','测量','视图','数据','工具','扩展'];
       assert.deepEqual(await page.getByRole('tab').allTextContents(), tabs);
-      assert.deepEqual(await project.locator('.studio-project-branches > li > .managed-tree-row strong').allTextContents(), ['变量','几何','材料','坐标系','属性类型']);
+      assert.deepEqual(await project.locator('.studio-project-branches > li > .managed-tree-row strong').allTextContents(), ['变量','几何','材料','坐标系','属性类型','网格管理','仿真管理']);
       assert.equal(await page.locator('[data-command^="primitive."]').count(), 9);
       assert.equal(await page.locator('[data-command^="surface."]').count(), 5);
       assert.deepEqual(await page.locator('.workbench-tool-group > small').allTextContents(), ['基础体','基础面','生成几何']);
@@ -223,6 +239,26 @@ async function assertModelVisible() {
       await page.getByRole('tab',{name:'建模',exact:true}).click();
     });
     await check('instance edits restore typed values and immutable keys', async () => { await project.getByRole('button', { name: /Port1 工程属性|Port1 face/ }).dblclick(); const panel = page.getByTestId('property-schema-panel'); await panel.getByLabel('频率', { exact: true }).waitFor(); assert.equal(await panel.getByLabel('频率', { exact: true }).inputValue(), '3'); assert.equal(await panel.getByLabel('启用', { exact: true }).isChecked(), true); assert.equal(await panel.getByLabel('偏移表达式').inputValue(), 'boardWidth / 2'); assert.equal(await panel.getByLabel('方向', { exact: true }).inputValue(), '1, 0, 0'); assert.equal(await panel.getByLabel('属性类型', { exact: true }).isDisabled(), true); assert.equal(await panel.locator('input[aria-label*="Key"]').count(), 0); await panel.getByLabel('频率', { exact: true }).fill('4.5'); await panel.getByRole('button', { name: '保存实例', exact: true }).click(); await page.getByText('实例已保存，工程树已同步。').waitFor(); const listed = await command('property.instance.list'); assert.equal(listed.instances.find((item) => item.instanceId === port.instance.instanceId).value.frequency, 4.5); await close(); });
+    await check('Vector3 stores mixed formulas and previews them without changing the project', async () => {
+      await project.getByRole('button',{name:/Port1 face/}).dblclick();
+      const panel=page.getByTestId('property-schema-panel');
+      const vector=panel.getByLabel('方向',{exact:true});
+      const evaluate=panel.getByRole('button',{name:'预览向量',exact:true});
+      await vector.fill('missingVariable, 0, 1'); await evaluate.click();
+      await panel.getByRole('alert').filter({hasText:/X:.*missingVariable/}).waitFor();
+      const formula='boardWidth / 2, max(2, min(3, 4)), 1';
+      await vector.fill(formula); await evaluate.click();
+      await panel.getByRole('status').filter({hasText:'X 25 · Y 3 · Z 1'}).waitFor();
+      const before=await command('property.instance.list');
+      assert.deepEqual(before.instances.find(item=>item.instanceId===port.instance.instanceId).value.axis,[1,0,0]);
+      await panel.getByRole('button',{name:'保存实例',exact:true}).click();
+      await panel.getByText('实例已保存，工程树已同步。').waitFor();
+      const after=await command('property.instance.list');
+      assert.deepEqual(after.instances.find(item=>item.instanceId===port.instance.instanceId).value.axis,['boardWidth / 2','max(2, min(3, 4))',1]);
+      await close(); await project.getByRole('button',{name:/Port1 face/}).dblclick();
+      assert.equal(await vector.inputValue(),formula);
+      await close();
+    });
     await check('project data double-click restores only that record', async () => { await project.locator('button.managed-record').filter({ has: page.locator('strong', { hasText: /^boardWidth$/ }) }).dblclick(); const panel = page.getByTestId('project-data-variables'); assert.equal(await panel.getByRole('textbox').nth(0).inputValue(), 'boardWidth'); assert.equal(await panel.getByRole('textbox').nth(1).inputValue(), '50 mm'); assert.equal(await panel.locator('.project-data-list').count(), 0); await close(); });
     await check('right-click and keyboard menus work with protected data', async () => { await project.getByRole('button', { name: /Global/ }).first().click({ button: 'right' }); const menu = page.getByRole('menu', { name: 'Global操作' }); await menu.waitFor(); assert.equal(await menu.getByRole('menuitem', { name: /删除/ }).isDisabled(), true); await page.keyboard.press('Escape'); assert.equal(await menu.count(), 0); await project.getByRole('button', { name: '变量操作', exact: true }).focus(); await page.keyboard.press('Shift+F10'); await page.getByRole('menu', { name: '变量操作' }).waitFor(); await page.keyboard.press('ArrowDown'); await page.keyboard.press('Escape'); });
     await check('Body row is legible and material edits preserve ID, selection and history', async () => {
@@ -278,6 +314,32 @@ async function assertModelVisible() {
       await material.getByLabel('属性 Key', { exact: true }).fill('lossTangent'); await material.getByLabel('属性值', { exact: true }).fill('0.02');
       await material.getByRole('button', { name: '保存材料', exact: true }).click(); await material.getByText('材料 FR4 已保存。', { exact: true }).waitFor();
       const summary = await command('document.summary'); assert.equal(summary.materials.find((item) => item.name === 'FR4').customProperties.lossTangent.value, 0.02); await close();
+    });
+    await check('a single mesh tree item opens the workbench and solver state is available separately', async () => {
+      await project.getByRole('button',{name:/仿真管理$/}).click();
+      await project.getByRole('button',{name:/求解器状态.*未接入/}).click();
+      await page.getByRole('region',{name:'仿真运行状态'}).getByRole('heading',{name:'求解器未接入'}).waitFor();
+      await close(); await project.getByRole('button',{name:/仿真管理$/}).click();
+      const library=await command('mesh.strategy.list');
+      await command('mesh.strategy.create',{name:'工程树方案',options:{repairMode:'conservative',qualityThreshold:0.2}},{},library.stateToken);
+      const meshNode = project.getByRole('button',{name:'网格管理',exact:true});
+      assert.equal(await meshNode.count(),1);
+      const row = meshNode.locator('xpath=ancestor::li[1]');
+      assert.equal(await row.getAttribute('aria-expanded'),null);
+      assert.equal(await row.getByRole('group').count(),0);
+      await meshNode.click();
+      const mesh=page.getByTestId('mesh-workbench-panel');
+      const strategies=mesh.getByTestId('mesh-strategy-controls');
+      await strategies.locator('summary').click();
+      await strategies.getByRole('button',{name:'刷新方案清单',exact:true}).click();
+      const strategySelect = strategies.getByLabel('工程网格方案',{exact:true});
+      const option = strategySelect.locator('option').filter({hasText:'工程树方案 · V1'});
+      await option.waitFor({state:'attached'});
+      await strategySelect.selectOption(await option.getAttribute('value'));
+      await mesh.getByRole('button',{name:'按工程方案剖分（结果默认隐藏）',exact:true}).waitFor();
+      assert.equal((await (await fetch(api+'/documents/default/mesh/jobs')).json()).jobs.length,0);
+      await strategySelect.selectOption('');
+      await close();
     });
     await check('conformal mesh stays hidden initially and uses one grid icon per Body', async () => {
       await page.getByRole('tab', { name: '网格', exact: true }).click(); await page.locator('[data-command="analysis.mesh"]').click();
@@ -403,7 +465,8 @@ async function assertModelVisible() {
       await mesh.getByRole('button',{name:'开始剖分（结果默认隐藏）',exact:true}).click();const next=(await (await submission).json()).meshJob;
       await mesh.locator('a.mesh-download[href*="'+next.jobId+'"]').waitFor({timeout:60000});
       await mesh.locator('.mesh-task-history summary').click();assert.equal(await mesh.locator('li[data-state="complete"]').count(),2);
-      await mesh.getByRole('button',{name:'查看结果',exact:true}).click();await mesh.locator('a.mesh-download[href*="'+first.jobId+'"]').waitFor();
+      await mesh.locator(`li[data-job-id="${first.jobId}"]`).getByRole('button',{name:'查看结果',exact:true}).click();
+      await mesh.locator('a.mesh-download[href*="'+first.jobId+'"]').waitFor();
       assert.equal(await geometry.locator('.body-mesh-visibility-button[aria-pressed="true"]').count(),0);
       await mesh.getByRole('button',{name:'显示网格',exact:true}).click();await page.waitForFunction(()=>Number(document.querySelector('[data-testid="cad-viewport"]').dataset.renderedMeshGroups)>0);
       await mesh.getByRole('button',{name:'查看结果',exact:true}).click();await mesh.locator('a.mesh-download[href*="'+next.jobId+'"]').waitFor();
@@ -659,15 +722,18 @@ async function assertModelVisible() {
         const control=manager.getByLabel(`字段 ${number} 默认值`,{exact:true});if(type==='bool'||type==='enum')await control.selectOption(String(value));else await control.fill(String(value));
       }
       assert.equal(await manager.getByRole('button',{name:'保存类型',exact:true}).isDisabled(),true);
-      const before=await command('property.type.list');await manager.getByLabel('字段 6 默认值',{exact:true}).fill('0,,1');await manager.getByRole('button',{name:'预览字段迁移',exact:true}).click();await manager.getByRole('alert').filter({hasText:'三个非空数值'}).waitFor();
+      const before=await command('property.type.list');await manager.getByLabel('字段 6 默认值',{exact:true}).fill('0,,1');await manager.getByRole('button',{name:'预览字段迁移',exact:true}).click();await manager.getByRole('alert').filter({hasText:'三个非空分量'}).waitFor();
       assert.equal((await command('property.type.list')).stateToken,before.stateToken);
-      await manager.getByLabel('字段 6 默认值',{exact:true}).fill('0, 0, 1');await manager.getByRole('button',{name:'预览字段迁移',exact:true}).click();await manager.getByLabel('字段迁移预览',{exact:true}).waitFor();
+      await manager.getByLabel('字段 6 默认值',{exact:true}).fill('max(2, 3), 0, 1');
+      await manager.getByRole('button',{name:'预览向量',exact:true}).click();
+      await manager.getByRole('status').filter({hasText:'X 3 · Y 0 · Z 1'}).waitFor();
+      await manager.getByRole('button',{name:'预览字段迁移',exact:true}).click();await manager.getByLabel('字段迁移预览',{exact:true}).waitFor();
       assert.equal((await command('property.type.list')).stateToken,before.stateToken);assert.equal(await manager.getByRole('button',{name:'保存类型',exact:true}).isDisabled(),false);
       await manager.getByLabel('字段 3 默认值',{exact:true}).fill('4.5');assert.equal(await manager.getByRole('button',{name:'保存类型',exact:true}).isDisabled(),true);
       await manager.getByRole('button',{name:'预览字段迁移',exact:true}).click();await manager.getByLabel('字段迁移预览',{exact:true}).getByText('4.5',{exact:true}).waitFor();
       await manager.getByLabel('字段迁移预览',{exact:true}).scrollIntoViewIfNeeded();await page.screenshot({path:path.join(screenshots,'property-defaults-migration.png'),fullPage:true});
       await manager.getByRole('button',{name:'保存类型',exact:true}).click();await manager.getByText('属性类型已保存，工程树已同步。').waitFor();
-      const expected={enabled:false,exact:'9223372036854775807',frequency:4.5,formula:'boardWidth / 2',mode:'B',axis:[0,0,1]};
+      const expected={enabled:false,exact:'9223372036854775807',frequency:4.5,formula:'boardWidth / 2',mode:'B',axis:['max(2, 3)',0,1]};
       const values=(await command('property.instance.list')).instances.filter(i=>i.typeId===fixture.type.typeId);assert.equal(values.length,2);values.forEach(instance=>assert.deepEqual(instance.value,expected));
       assert.equal(await manager.getByLabel('字段 1 Key',{exact:true}).isDisabled(),true);await close();
     });
@@ -843,7 +909,9 @@ async function assertModelVisible() {
       await page.getByRole('button', { name: '参数建模', exact: true }).click();
     });
     await close();
+    await construction.click();
     await page.getByLabel('构造平面网格间距',{exact:true}).selectOption('1');
+    await construction.click();
     await check('a landing click with sub-four-pixel jitter never locks a footprint or creates a sphere',async()=>{
       const before=await command('document.view');
       const dragToggle=page.getByRole('button',{name:'拖拽建模',exact:true});
@@ -1043,6 +1111,7 @@ async function assertModelVisible() {
       await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
       await page.getByLabel('拖拽建模类型',{exact:true}).selectOption('box');
       const before=await command('document.summary');
+      await construction.click();
       await page.getByLabel('构造坐标系',{exact:true}).selectOption('drag_rotated');
       await page.getByLabel('构造平面吸附步长',{exact:true}).selectOption('0.5');
       await page.getByRole('button',{name:'正视构造面',exact:true}).click();
@@ -1067,7 +1136,9 @@ async function assertModelVisible() {
       await dragKind.waitFor({state:'detached'});
       await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
       await page.mouse.click(x,y);await page.mouse.move(x+70,y-45,{steps:4});
+      await construction.click();
       await page.getByLabel('构造平面吸附步长',{exact:true}).selectOption('0.1');
+      await construction.click();
       assert.equal(await page.locator('.drag-modeling-feedback').count(),0,'Changing snap must cancel the old drawing');
       await page.mouse.move(x,y);
       const marker = page.locator('.construction-snap-marker[data-point]');
@@ -1080,8 +1151,10 @@ async function assertModelVisible() {
       assert.equal(await editor.getByLabel('参考坐标系',{exact:true}).inputValue(),'drag_rotated');
       assert.equal((await command('document.summary')).revision,saved.revision,'Switching to parameters must not create geometry');
       await close();
+      await construction.click();
       await page.getByLabel('构造坐标系',{exact:true}).selectOption('global');
       await page.getByLabel('构造平面吸附步长',{exact:true}).selectOption('1');
+      await construction.click();
       await page.locator('[title="顶视图"]').click();
       await page.screenshot({path:path.join(screenshots,'construction-plane.png'),fullPage:true});
     });
@@ -1287,6 +1360,7 @@ async function assertModelVisible() {
       near(midpoint[2],30.375);
       await page.reload({waitUntil:'networkidle'});
       await assertModelVisible();
+      await construction.click();
       await page.getByLabel('构造坐标系',{exact:true}).selectOption(coordinateSystemId);
       await page.getByRole('button',{name:'正视构造面',exact:true}).click();
       await page.getByRole('button',{name:'拖拽建模',exact:true}).click();
@@ -1316,9 +1390,13 @@ async function assertModelVisible() {
       await pointKind(offPlane.edges[0].snap.endpoints[0], 'grid');
       await pointKind(hidden.edges[0].snap.endpoints[0], 'grid');
       const snapToggle = page.getByRole('button',{name:'几何吸附',exact:true});
+      await construction.click();
       await snapToggle.click();
+      await construction.click();
       await pointKind(start, 'grid');
+      await construction.click();
       await snapToggle.click();
+      await construction.click();
       await pointKind(start, 'endpoint');
       assert.equal(await marker.getAttribute('data-point'), '-30.25,-7.625');
       const startScreen = screen(start), endScreen = screen(midpoint);

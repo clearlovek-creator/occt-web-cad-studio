@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {associationDefinition,MAX_PROPERTY_TARGETS,propertyTargetKey} from '../shared/property-targets.mjs';
+import {isPropertyVector} from '../shared/property-vector.mjs';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,96}$/;
 const KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
@@ -264,7 +265,7 @@ export class PropertySchemaStore {
       if (field.type === "bool" && typeof current !== "boolean") throw new Error(`value.${field.key} must be boolean.`);
       if (field.type === "int" && (!Number.isSafeInteger(current) && !(typeof current === "string" && /^[-+]?\d+$/.test(current)))) throw new Error(`value.${field.key} must be a safe integer number or an exact integer string.`);
       if (field.type === "double" && !numeric(current)) throw new Error(`value.${field.key} must be numeric.`);
-      if (field.type === "vector3" && (!Array.isArray(current) || current.length !== 3 || current.some((entry) => !numeric(entry)))) throw new Error(`value.${field.key} must be a 3-vector.`);
+      if (field.type === "vector3" && !isPropertyVector(current)) throw new Error(`value.${field.key} must be a 3-vector of finite numbers or non-empty scalar expressions up to 512 bytes.`);
       if (field.type === "enum" && !field.options.includes(String(current))) throw new Error(`value.${field.key} must be one of the enum options.`);
       if (field.type === "expression" && typeof current !== "string") throw new Error(`value.${field.key} must be an expression string.`);
     }

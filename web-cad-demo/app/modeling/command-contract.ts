@@ -1,6 +1,7 @@
 import type {ModelingTaskStatus} from '../../shared/modeling-task-status.mjs';
 export type ModelingSelectionKind = "body" | "face" | "edge";
 const READ_ONLY_COMMANDS = new Set(["health.ping","document.summary","document.view","document.preview","document.naming.preview","feature.input.preview","body.presentation","property.list","property.type.list","property.instance.list","property.type.preview","property.package.export","geometry.measure","geometry.check","geometry.relation","mesh.strategy.list"]);
+READ_ONLY_COMMANDS.add("property.vector.preview");
 export const isReadOnlyCommand = (operation: string) => READ_ONLY_COMMANDS.has(operation);
 
 export type ModelingSelection = {

@@ -105,6 +105,37 @@ double CadDocument::parameterValue(const JsonValue& parameters, const std::strin
   return result;
 }
 
+std::string CadDocument::PreviewPropertyVector(const std::string& requestId, const JsonValue& parameters) const
+{
+  const auto& components = parameters.At("value").AsArray();
+  if (components.size() != 3) throw CadError("INVALID_PROPERTY_VECTOR", "Vector3 requires three components.");
+  JsonValue values = JsonValue::MakeArray();
+  for (std::size_t index = 0; index < components.size(); ++index)
+  {
+    const JsonValue& component = components[index];
+    try
+    {
+      double value = 0.0;
+      if (component.IsNumber()) value = component.AsNumber();
+      else
+      {
+        const std::string& expression = component.AsString();
+        if (expression.empty() || expression.size() > 512)
+          throw CadError("INVALID_EXPRESSION", "Expected a scalar expression of 1-512 bytes.");
+        value = myVariables.Evaluate(expression).Value;
+      }
+      values.ChangeArray().emplace_back(value);
+    }
+    catch (const CadError& error)
+    {
+      throw CadError(error.Code(), std::string("XYZ").at(index) + std::string(": ") + error.what());
+    }
+  }
+  return "{\"ok\":true,\"protocolVersion\":1,\"requestId\":\"" + JsonEscape(requestId)
+       + "\",\"documentId\":\"" + JsonEscape(myDocumentId) + "\",\"revision\":" + std::to_string(myRevision)
+       + ",\"vectorValue\":" + JsonSerialize(values) + "}";
+}
+
 std::string CadDocument::SetVariable(const std::string& requestId, const int expectedRevision,
                                      const JsonValue& parameters, const HistoricalInputTarget& inspectionTarget)
 {

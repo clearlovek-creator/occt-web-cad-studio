@@ -10,15 +10,17 @@ test("migration preview uses real validation, is read-only, and matches all six 
   try{
     const store=new PropertySchemaStore(root),type=store.createType("default",{key:"Setup",fields:[]});
     for(let i=0;i<7;i++)store.createInstance("default",{typeId:type.typeId,name:`Setup${i}`,value:{}});
-    const fields=[{key:"flag",type:"bool",default:false},{key:"count",type:"int",default:"9223372036854775807"},{key:"number",type:"double",default:3.5},{key:"expr",type:"expression",default:"W / 2"},{key:"mode",type:"enum",options:["A","B"],default:"B"},{key:"axis",type:"vector3",default:[0,0,1]}].map(field=>({...field,required:true}));
+    const fields=[{key:"flag",type:"bool",default:false},{key:"count",type:"int",default:"9223372036854775807"},{key:"number",type:"double",default:3.5},{key:"expr",type:"expression",default:"W / 2"},{key:"mode",type:"enum",options:["A","B"],default:"B"},{key:"axis",type:"vector3",default:["W / 2","max(2, 3)",1]}].map(field=>({...field,required:true}));
     const before=store.list("default"),bytes=fs.readFileSync(store.filePath("default")),version=store.contentVersion("default");
     const preview=store.previewTypeUpdate("default",{typeId:type.typeId,fields});
+    assert.deepEqual(preview.examples[0].addedValues.axis,["W / 2","max(2, 3)",1]);
     assert.equal(preview.instanceCount,7);assert.equal(preview.examples.length,5);assert.equal(preview.addedFields.length,6);
     assert.deepEqual(store.list("default"),before);assert.deepEqual(fs.readFileSync(store.filePath("default")),bytes);assert.equal(store.contentVersion("default"),version);
     assert.throws(()=>store.previewTypeUpdate("default",{typeId:type.typeId,fields:[{key:"required",type:"double",required:true}]}),/required/);
     assert.deepEqual(fs.readFileSync(store.filePath("default")),bytes);
     store.updateType("default",{typeId:type.typeId,fields});
     for(const instance of store.list("default").instances)assert.deepEqual(instance.value,preview.examples[0].addedValues);
+    assert.deepEqual(new PropertySchemaStore(root).list("default").instances[0].value.axis,preview.examples[0].addedValues.axis);
     assert.throws(()=>store.updateInstance("default",{instanceId:before.instances[0].instanceId,value:{...preview.examples[0].addedValues,count:9007199254740992}}),/safe integer/);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

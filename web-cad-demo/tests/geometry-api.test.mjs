@@ -60,6 +60,35 @@ async function post(pathname, body = {}) {
   return { response, payload: observedClient.observe(await response.json(), body.documentId) };
 }
 
+test("tube display uses refined matching boundaries and smooth outward and inward normals", async () => {
+  const documentId = "curved-viewport";
+  const { payload: created } = await post("/commands", { documentId, operation: "primitive.tube", parameters: { outerRadius: 50, innerRadius: 43, height: 24 } });
+  assert.equal(created.ok, true, created.error);
+  const { payload: view } = await post("/commands", { documentId, operation: "body.presentation", inputs: { bodyId: created.bodyId } });
+  assert.equal(view.ok, true, view.error);
+  assert.equal(view.stats.truncated, false);
+  const vertices = new Set();
+  const radiiWithCurvedNormals = new Set();
+  for (let index = 0; index < view.positions.length; index += 3) {
+    const [x, y, z] = view.positions.slice(index, index + 3);
+    const [nx, ny, nz] = view.normals.slice(index, index + 3);
+    vertices.add(`${x},${y},${z}`);
+    if (Math.abs(nz) > 0.5) continue;
+    const radius = Math.hypot(x, y);
+    const outward = radius > 46;
+    assert.ok(Math.abs(nx - (outward ? x : -x) / radius) < 1e-6);
+    assert.ok(Math.abs(ny - (outward ? y : -y) / radius) < 1e-6);
+    radiiWithCurvedNormals.add(outward ? "outer" : "inner");
+  }
+  assert.equal(radiiWithCurvedNormals.size, 2);
+  const rims = view.edges.filter(edge => edge.points.length > 6);
+  assert.equal(rims.length, 4);
+  for (const rim of rims) {
+    assert.ok(rim.points.length / 3 >= 65, "a full circular rim needs enough segments for a smooth outline");
+    for (let index = 0; index < rim.points.length; index += 3) assert.ok(vertices.has(rim.points.slice(index, index + 3).join(",")));
+  }
+});
+
 test("all fourteen drag tools create kernel geometry without replacing previous Bodies", async () => {
   let count = 0;
   for (const kind of ["box","cylinder","cone","sphere","torus","wedge","prism","pyramid","tube","surface-rectangle","surface-disk","surface-cylinder","surface-cone","surface-sphere"]) {

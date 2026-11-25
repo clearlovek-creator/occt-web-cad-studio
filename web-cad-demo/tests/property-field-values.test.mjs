@@ -10,6 +10,7 @@ test("all six field types normalize editor defaults and exact integer values wit
   assert.equal(parsePropertyValue(field("expression"),"width / 2"),"width / 2");
   assert.equal(parsePropertyValue(field("enum",{options:["A","B"]}),"B"),"B");
   assert.deepEqual(parsePropertyValue(field("vector3"),"1, 2, -3"),[1,2,-3]);
+  assert.deepEqual(parsePropertyValue(field("vector3"),"width / 2, max(2, min(3, 4)), -1"),["width / 2","max(2, min(3, 4))",-1]);
   assert.equal(parsePropertyValue(field("double"),""),undefined);
   const fields=[field("vector3",{default:"0, 0, 1"}),{...field("double",{default:"3"}),key:"legacy"}];
   assert.deepEqual(normalizePropertyFields(fields,["legacy"]).map(f=>f.default),[[0,0,1],"3"]);
@@ -19,4 +20,6 @@ test("invalid defaults, blank vector components and already rounded integer numb
   for(const [type,value,extra] of [["int","1.2"],["int",9007199254740992],["double","Infinity"],["double",true],["bool","false"],["vector3","0,,1"],["vector3",[0,null,1]],["enum","C",{options:["A"]}],["expression",42]])assert.throws(()=>parsePropertyValue(field(type,extra),value));
   assert.throws(()=>parsePropertyValue(field("double",{required:true})," "),/不能为空/);
   assert.throws(()=>normalizePropertyFields([field("double",{default:""})]),/不能为空/);
+  assert.throws(()=>parsePropertyValue(field("vector3"),"0, max(1, 2, 3"));
+  assert.throws(()=>parsePropertyValue(field("vector3"),[0,,1]));
 });

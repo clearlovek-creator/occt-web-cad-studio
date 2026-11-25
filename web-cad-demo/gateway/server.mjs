@@ -38,6 +38,7 @@ import { AgentAuditStore } from "./llm/agent-audit-store.mjs";
 import { buildValidatedAgentPlan, reportAgentPlan } from "./llm/agent-plan-pipeline.mjs";
 import { resolveAgentPlan } from "./llm/agent-resolver.mjs";
 import { CAD_OPERATION_NAMES, isReadOnlyCadOperation } from "./llm/command-catalog.mjs";
+import { isPropertyVector } from "../shared/property-vector.mjs";
 import { ProviderHealthRegistry } from "./llm/provider-health.mjs";
 import { confirmationFingerprint, sameConfirmationFingerprint } from "./llm/agent-confirmation.mjs";
 import { resolveWritableDataDir } from "./data-dir.mjs";
@@ -528,7 +529,7 @@ async function sendCommand(command,options={}) {
 }
 async function command(operation, fields = {}) {
   const actualAssociationOperation=Object.hasOwn(fields,'operation')?fields.operation:operation;
-  const associationReadOnly=['health.ping','document.summary','document.view','body.presentation','geometry.measure','geometry.relation','property.list'].includes(actualAssociationOperation);
+  const associationReadOnly=['health.ping','document.summary','document.view','body.presentation','geometry.measure','geometry.relation','property.list','property.vector.preview'].includes(actualAssociationOperation);
   if(!associationReadOnly)propertyAssociationCache.clear();
   if(forceStopping||shuttingDown&&!runningDocuments.has(fields.documentId))throw new GatewayRequestError('SERVICE_STOPPING','后台正在停止，未开始新的工程操作。');
   if (!worker) startWorker();
@@ -1268,6 +1269,8 @@ const PROPERTY_SCHEMA_OPERATIONS = new Set(["property.type.create", "property.ty
 const MESH_STRATEGY_OPERATIONS=new Set(['mesh.strategy.create','mesh.strategy.update','mesh.strategy.delete','mesh.strategy.list']);
 const READ_ONLY_OPERATIONS=new Set(["health.ping", "document.summary", "document.view", "document.preview", "document.naming.preview", "feature.input.preview", "body.presentation", "property.list", "property.type.list", "property.type.preview", "property.instance.list", "property.package.export", "geometry.check", "geometry.measure", "geometry.relation"]);
 KNOWN_OPERATIONS.add("property.type.preview");
+KNOWN_OPERATIONS.add("property.vector.preview");
+READ_ONLY_OPERATIONS.add("property.vector.preview");
 KNOWN_OPERATIONS.add("feature.input.preview");
 READ_ONLY_OPERATIONS.add('mesh.strategy.list');
 function isPropertySchemaOperation(operation) { return PROPERTY_SCHEMA_OPERATIONS.has(String(operation || "")); }
@@ -1414,6 +1417,9 @@ const OPERATION_SCHEMAS = new Map([
 ]);
 
 function validateOperationSchema(input, operation) {
+  if (operation === "property.vector.preview" && !isPropertyVector(input.parameters?.value)) {
+    throw new GatewayRequestError("SCHEMA_VALIDATION_FAILED", "Vector3 requires three finite numbers or scalar expressions.", {fieldPath:"parameters.value"});
+  }
   if(operation==="document.naming.preview" || operation==="document.naming.upgrade"){
     if(!Number.isInteger(input.baseRevision) || input.baseRevision<0 || Object.keys(input.inputs||{}).length || Object.keys(input.parameters||{}).length || input.preview===true || input.options?.preview===true)
       throw new GatewayRequestError("SCHEMA_VALIDATION_FAILED","命名升级是独立工程维护操作：必须提供当前修订，不接受几何参数；验证请使用 document.naming.preview。",{fieldPath:"baseRevision",retryableByModel:false});
@@ -2788,7 +2794,7 @@ const server = createServer(async (request, response) => {
         result = await serializeDocument(id, async () => {
           const startedAt = Date.now();
           try {
-            if(operation==="feature.input.preview" || operation==="document.naming.preview")checkStatePrecondition(id,fields);
+            if(operation==="feature.input.preview" || operation==="document.naming.preview" || operation==="property.vector.preview")checkStatePrecondition(id,fields);
             if(operation==="document.naming.preview")checkSelectionPrecondition(operation,fields);
             if(operation==="document.naming.preview")assertImportedNamingUpgrade(nativeCapabilities());
             const response = isProjectDataOperation(operation)

@@ -137,7 +137,7 @@
 .cad-shell .studio-tree-scroll .feature-order { width: 14px; height: 14px; }
 .cad-shell .studio-tree-scroll .feature-tree .panel-copy { margin: 2px 0 4px 16px; font-size: 11px; }
 
-.cad-shell .viewport-toolbar { z-index: 5; min-height: 32px; align-items: center; padding: 0; border: 1px solid var(--cad-border); border-radius: 3px 3px 0 0; background: #f4f7fc; }
+.cad-shell .viewport-toolbar { position: relative; z-index: 5; min-height: 32px; align-items: center; padding: 0; border: 1px solid var(--cad-border); border-radius: 3px 3px 0 0; background: #f4f7fc; }
 .cad-shell .view-tabs { flex-wrap: nowrap; gap: 5px; min-width: 0; padding: 3px 5px 3px 8px; overflow-x: auto; scrollbar-width: thin; white-space: nowrap; }
 .cad-shell .view-tabs > * { flex: 0 0 auto; }
 .cad-shell .view-tabs > strong { color: #395d82; font-size: 11px; }
@@ -146,10 +146,16 @@
 .cad-shell .viewport-selection-tools > button { min-width: 23px; height: 24px; padding: 0 4px; font-size: 11px; }
 .cad-shell .view-tools > button, .cad-shell .studio-panel-popover > button { width: 26px; height: 25px; padding: 0; border: 1px solid transparent; border-radius: 2px; background: transparent; color: var(--cad-accent); cursor: pointer; }
 .cad-shell .view-tools > button:hover:not(:disabled), .cad-shell .studio-panel-popover > button:hover { background: var(--cad-surface-3); border-color: var(--cad-border); }
-.cad-shell .construction-controls { flex-wrap: nowrap; min-height: 24px; gap: 7px; margin-left: 2px; padding: 0 5px 0 8px; border-top: 0; border-left: 1px solid var(--cad-border); }
-.cad-shell .construction-controls :is(select,button) { min-height: 23px; height: 23px; font-size: 11px; }
-.cad-shell .construction-controls label { gap: 4px; font-size: 11px; }
+.cad-shell .construction-trigger { display: inline-flex; align-items: center; gap: 4px; width: auto; height: 24px; margin-right: 3px; padding: 0 6px; border: 1px solid var(--cad-border); border-radius: 2px; background: var(--cad-surface-2); font-size: 11px; white-space: nowrap; }
+.cad-shell .construction-trigger[aria-expanded="true"] { background: var(--cad-surface-3); border-color: var(--cad-border-focus); }
+.cad-shell .construction-trigger i { width: 5px; height: 5px; margin: -2px 1px 0 0; border: solid currentColor; border-width: 0 1px 1px 0; transform: rotate(45deg); }
+.cad-shell .construction-popover span { width: auto; height: auto; margin: 0; background: none; }
+.construction-summary { display: flex; align-items: center; gap: 4px; color: var(--cad-accent); }
+.construction-coordinate-name { display: block; max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cad-shell .construction-controls { position: absolute; top: calc(100% + 4px); right: 4px; z-index: 10; display: grid; width: min(234px, calc(100% - 8px)); max-height: min(240px, 64vh); overflow: auto; gap: 6px; padding: 8px; border: 1px solid var(--cad-border-strong); border-radius: 3px; background: var(--cad-surface); box-shadow: 0 4px 14px #243c5926; }
+.cad-shell .construction-controls :is(select,button) { font-size: 12px; }
 .cad-shell .construction-controls button[aria-pressed="true"] { background: var(--cad-surface-3); border-color: #8db1dc; color: var(--cad-accent-strong); }
+@media (max-width: 520px) { .construction-coordinate-name { display: none; } }
 .cad-shell .viewport-panel { border: 1px solid var(--cad-border); border-top: 0; border-radius: 0 0 3px 3px; background: #e4ebf4; }
 .construction-snap-marker { display: none; position: absolute; z-index: 2; width: 11px; height: 11px; border: 2px solid #08738e; outline: 1px solid white; border-radius: 50%; background: #e4f6f9; transform: translate(-50%, -50%); pointer-events: none; }
 .construction-snap-marker[data-point] { display: block; }

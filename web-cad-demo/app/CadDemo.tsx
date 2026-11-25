@@ -73,7 +73,7 @@ import type { ModelingCommandInput, ModelingCommandResponse } from "./modeling/c
 
 type SelectionMode = "body" | "face" | "edge";
 type StandardView = "iso" | "top" | "front" | "right" | "back";
-type OperationKind = "primitives" | "surfaces" | "transform" | "boolean" | "agent" | "agentSettings" | "mesh" | "pattern" | "patternCircular" | "patternRectangular" | "patternMirror" | "revolve" | "shapeCheck" | "measure" | "fillet" | "chamfer" | "draft" | "offsetFeature" | "exchange" | "properties" | "propertyTypes" | "history" | "projectData" | "capabilities" | "bodyAppearance" | "generated" | "workspace" | "sources" | "backups";
+type OperationKind = "primitives" | "surfaces" | "transform" | "boolean" | "agent" | "agentSettings" | "mesh" | "simulation" | "pattern" | "patternCircular" | "patternRectangular" | "patternMirror" | "revolve" | "shapeCheck" | "measure" | "fillet" | "chamfer" | "draft" | "offsetFeature" | "exchange" | "properties" | "propertyTypes" | "history" | "projectData" | "capabilities" | "bodyAppearance" | "generated" | "workspace" | "sources" | "backups";
 
 const OPERATION_META: Record<OperationKind, { title: string; subtitle: string }> = {
   backups:{title:'工程备份管理',subtitle:'独立备份目录 · 原始版本下载 · 文件维护'},
@@ -89,6 +89,7 @@ const OPERATION_META: Record<OperationKind, { title: string; subtitle: string }>
 
   agentSettings: { title: "大模型设置", subtitle: "OpenAI 兼容 Provider · 连接测试 · API Key 管理" },
   mesh: { title: "网格工具", subtitle: "脏几何修复 · 表面交叉处理 · 四面体质量分析" },
+  simulation: { title: "仿真管理", subtitle: "求解器接入与运行状态" },
   pattern: { title: "线性阵列", subtitle: "沿方向复制当前 Body" },
   patternCircular: { title: "环形阵列", subtitle: "绕轴复制当前 Body" },
   patternRectangular: { title: "矩形阵列", subtitle: "沿两条方向复制当前 Body" },
@@ -2956,6 +2957,10 @@ export default function CadDemo() {
     if (activeOperation === "bodyAppearance") { const body = model?.bodyMetadata?.find((item) => item.bodyId === appearanceBodyId); return body ? <BodyAppearancePanel key={body.bodyId} body={{ ...body, topologyRevision: body.topologyRevision || 0 }} materials={(model?.materials || []).map((item) => item.name)} onSave={(id,changes)=>updateBodyFromTree(id,changes,true)} /> : <p className="panel-copy">该 Body 已不存在。</p>; }
     if (activeOperation === "agentSettings") return <AgentProviderSettingsPanel />;
     if (activeOperation === "mesh") return <MeshWorkbenchPanel documentId={controllerState.documentId} geometry={model} revision={model?.revision ?? null} selectedBodyId={selectedBodyId || model?.bodyId || null} selectedFaceId={selectionMode === "face" && selectedId?.startsWith("face-") ? selectedId : null} latestResult={meshResults.at(-1)} onMeshResult={handleMeshResult} tasks={meshTasks} qualitySelection={qualitySelection} onLocateQuality={handleLocateQuality} onLocateCadFace={source=>void locateMeshSourceFace(source)} preparationPreviewId={preparationDisplay?.meshJob.jobId||null} onPreparationPreview={handlePreparationPreview} onLocateDiagnostic={target=>void locateDiagnostic(target)} />;
+    if (activeOperation === "simulation") return <section className="panel-section" aria-label="仿真运行状态">
+      <div className="section-heading compact"><div><h2>求解器未接入</h2><small>当前工程可以管理几何、网格和属性。接入求解器后，运行状态将在这里显示。</small></div></div>
+      <button type="button" className="secondary-action" onClick={() => { setPropertyTypeId(undefined); setActiveOperation("propertyTypes"); }}>查看工程属性类型</button>
+    </section>;
     if (activeOperation === "agent") return <PiModelingAgentPanel revision={model?.revision ?? null} selection={selectedId && (selectedBodyId || model?.bodyId) ? { kind: selectionMode, bodyId: selectedBodyId || model?.bodyId || "", topologyId: selectionMode === "body" ? undefined : selectedId } : null} onCommitted={(result) => handleDirectModel(result as ModelData)} />;
     if (activeOperation === "primitives") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId,coordinatePlane:constructionPlane}} mode="primitive" fixedKind={activeTool?.startsWith("primitive.")} initialPrimitive={activeTool?.startsWith("primitive.") ? activeTool.slice(10) as PrimitiveKind : "box"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
     if (activeOperation === "surfaces") return <AdvancedModelingPanel key={`${activeTool}:${parameterDraft?.version}`} initialParameters={parameterDraft?.kind === dragPrimitive ? parameterDraft.parameters : {coordinateSystemId:constructionId,coordinatePlane:constructionPlane}} mode="surface" fixedKind={activeTool?.startsWith("surface.")} initialSurface={activeTool?.startsWith("surface.") ? activeTool.slice(8) as SurfaceKind : "rectangle"} model={model} onModel={handleDirectModel} onProjectRevision={handleProjectRevision} onDraftChange={rememberParameterInput} onSwitchToDrag={() => changeModelingMethod(true)} />;
@@ -3166,6 +3171,7 @@ export default function CadDemo() {
             onEditData={openProjectData} onDeleteData={deleteProjectData}
             onEditType={(typeId) => { setPropertyTypeId(typeId); setActiveOperation("propertyTypes"); }}
             onEditInstance={(typeId, instanceId) => { setInstanceTypeId(typeId); setPropertyInstanceId(instanceId); setActiveOperation("properties"); }}
+            onOpenMesh={() => setActiveOperation("mesh")} onOpenSimulation={() => setActiveOperation("simulation")}
             onSelectTarget={selectTargetFromProperty} onSelectTargets={targets=>void selectTargetsFromProperty(targets)} onError={setError} query={treeQuery} onQuery={setTreeQuery} onHide={() => changePanel("tree", false)} geometry={
               <FeatureTree query={treeQuery} features={model?.features ?? []} bodies={(model?.bodyMetadata || []).map((body) => ({ ...body, topologyRevision: body.topologyRevision || 0 }))}
               activeBodyId={model?.activeBodyId || model?.bodyId || null} selectedBodyId={selectedBodyId} selectedBodyIds={selectedBodyIds}
@@ -3222,12 +3228,12 @@ export default function CadDemo() {
                 <button type="button" aria-keyshortcuts="Alt+M" title={sourceRecoveryBlocked ? "来源事务待复核，请先查看恢复记录" : "参数建模 · Alt+M 切换；保留已拖拽的尺寸"} aria-pressed={!preferDragModeling} disabled={busy || sourceRecoveryBlocked} onClick={() => changeModelingMethod(false)}>参数建模</button>
               </div>
               {dragModeling && <select className="drag-modeling-kind" aria-label="拖拽建模类型" value={dragPrimitive} disabled={busy || sourceRecoveryBlocked} onChange={(event) => { parameterInputRef.current = null; setParameterDraft(null); setDragPrimitive(event.target.value as GridDragKind); }}>{[["box","长方体"],["cylinder","圆柱体"],["cone","圆锥体"],["sphere","球体"],["torus","圆环体"],["wedge","楔体"],["prism","棱柱"],["pyramid","棱台"],["tube","圆管"],["surface-rectangle","矩形面"],["surface-disk","圆面"],["surface-cylinder","圆柱面"],["surface-cone","圆锥面"],["surface-sphere","球面"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select>}
+            </div>
+            <div className="view-tools" aria-label="视口工具">
               <ConstructionControls coordinates={constructionCoordinates} selectedId={constructionId} plane={constructionPlane} frame={constructionInfo.frame} error={constructionInfo.error} gridStep={gridStep} snapStep={snapOverride} geometrySnap={geometrySnap} disabled={commandBusy || sourceRecoveryBlocked || Boolean(activeOperation)}
                 onCoordinate={id=>selectConstruction(id,constructionPlane)} onPlane={plane=>selectConstruction(constructionId,plane)}
                 onGridStep={step=>{cancelDragRef.current();setParameterDraft(null);setGridStep(step);}} onSnapStep={step=>{cancelDragRef.current();setParameterDraft(null);setSnapOverride(step);}}
                 onGeometrySnap={enabled=>{cancelDragRef.current();geometrySnapRef.current=enabled;setGeometrySnap(enabled);}} onAlign={alignToConstruction}/>
-            </div>
-            <div className="view-tools" aria-label="视口工具">
               <button onClick={() => void handleCommand("view.fit")} aria-label="适应窗口" title="适应窗口"><StudioIcon name="fit" /></button>
               <button onClick={() => void handleCommand("view.iso")} aria-label="轴测视图" title="轴测视图"><StudioIcon name="iso" /></button>
               <button onClick={() => void handleCommand("view.screenshot")} disabled={!viewerReady} aria-label="截图" title="保存视口截图 PNG"><StudioIcon name="camera" /></button>

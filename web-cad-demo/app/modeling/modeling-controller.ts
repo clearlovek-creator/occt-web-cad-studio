@@ -989,7 +989,7 @@ export class ModelingController<TModel = unknown> {
   disposeTaskTracking(){this.workspaceEpoch++;this.workspaceRead?.abort.abort();this.workspaceRead=null;this.archiveDownload?.abort.abort();this.taskClient?.dispose();}
   async clearCompletedModelingTasks(){if(!this.taskClient)return {deleted:0,retained:0};return this.taskClient.clearCompleted(this.state.documentId);}
   private persistWorkspaceChoice() {if(typeof window!=="undefined"){try{window.sessionStorage.setItem("occt.activeDocumentId",this.state.documentId);}catch{}try{window.localStorage.setItem("occt.activeDocumentId",this.state.documentId);}catch{/* Storage can be disabled by the browser. */}}}
-  private isReadOnlyOperation(operation:string){return operation.endsWith('.list')||['document.view','document.summary','document.preview','document.naming.preview','body.presentation','geometry.check','geometry.measure','geometry.relation'].includes(operation);}
+  private isReadOnlyOperation(operation:string){return operation.endsWith('.list')||['document.view','document.summary','document.preview','document.naming.preview','body.presentation','geometry.check','geometry.measure','geometry.relation','property.vector.preview'].includes(operation);}
   hasPendingMutation() {
     return Boolean(this.workspaceTransfer)||Boolean(this.pythonAgent?.blocksWorkspaceSwitch())||[...this.pendingCommands.values()].some(operation=>!this.isReadOnlyOperation(operation))||Boolean(this.taskClient?.hasPending(this.state.documentId))||(this.state.stepImportStatus?.documentId===this.state.documentId&&activeStepImport(this.state.stepImportStatus.phase));
   }

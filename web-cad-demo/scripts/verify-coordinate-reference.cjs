@@ -89,6 +89,8 @@ async function finishJointRepair(id,before,repair){
     await check('XZ and YZ drive the grid, drag height and parameter handoff with grid-linked snapping',async()=>{
       const id='coordinate_plane_ui';
       await cad(id,'primitive.box',{width:80,depth:50,height:30});await open(id);
+      const construction=page.getByRole('button',{name:'构造设置',exact:true});
+      await construction.click();
       const plane=page.getByLabel('构造平面',{exact:true}),grid=page.getByLabel('构造平面网格间距',{exact:true});
       const snap=page.getByLabel('构造平面吸附步长',{exact:true});
       const drag=page.getByRole('button',{name:'拖拽建模',exact:true});
@@ -107,14 +109,18 @@ async function finishJointRepair(id,before,repair){
       assert.ok((await point()).every(value=>value%5===0));
       await page.mouse.click(x,y);await page.mouse.move(x+120,y-85,{steps:8});
       await page.locator('.drag-dimension-readout').waitFor();
+      await construction.click();
       await grid.selectOption('1');
       assert.equal(await page.locator('.drag-dimension-readout').count(),0);
       await grid.selectOption('5');
       await snap.selectOption('0.5');
+      await construction.click();
       const manual=[];
       for(let offset=1;offset<8;offset++){await page.mouse.move(x+offset*6,y-offset*3);manual.push(...await point());}
       assert.ok(manual.every(value=>Number.isInteger(value*2)) && manual.some(value=>value%5!==0));
+      await construction.click();
       await snap.selectOption('grid');
+      await construction.click();
       await page.mouse.click(x,y);await page.mouse.move(x+120,y-85,{steps:8});await page.mouse.click(x+120,y-85);
       await page.mouse.move(x+120,y-200,{steps:8});
       const response=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON()?.operation==='primitive.box');
@@ -125,6 +131,7 @@ async function finishJointRepair(id,before,repair){
       const ys=result.positions.filter((_,index)=>index%3===1);
       assert.ok(Math.abs(Math.max(...ys))<1e-6 && Math.abs(Math.min(...ys)+params.height)<1e-6);
       await page.getByLabel('拖拽建模类型',{exact:true}).waitFor({state:'detached'});
+      await construction.click();
       await plane.selectOption('YZ');await align.click();await drag.click();
       await page.getByLabel('拖拽建模类型',{exact:true}).selectOption('surface-rectangle');
       await page.mouse.click(x,y);await page.mouse.move(x+120,y-85,{steps:8});
@@ -166,7 +173,7 @@ async function finishJointRepair(id,before,repair){
       for(const candidate of new Set(cut.triangleFaceIds)){const m=await cad(id,'geometry.measure',{}, {bodyId:base.bodyId,selectionType:'face',selectionId:candidate});if(Math.abs(m.area-2*Math.PI*5*20)<1e-3)face=candidate;}assert.ok(face);
       await cad(id,'coordinate.set',{id:'broken',name:'Broken frame',kind:'face',referenceBodyId:base.bodyId,referenceTopologyId:face});await cad(id,'feature.update',{x:200},{featureId:tool.features.at(-1).id});await open(id);
       const row=page.getByTestId('project-tree').locator('button.managed-record').filter({has:page.locator('strong',{hasText:/^Broken frame$/})});assert.ok((await row.getAttribute('class')).includes('invalid'));assert.match(await row.innerText(),/引用失效/);
-      await page.getByLabel('构造坐标系',{exact:true}).selectOption('broken');await page.getByRole('button',{name:'拖拽建模',exact:true}).click();await page.locator('.construction-frame-warning').waitFor();
+      await page.getByRole('button',{name:'构造设置',exact:true}).click();await page.getByLabel('构造坐标系',{exact:true}).selectOption('broken');await page.getByRole('button',{name:'拖拽建模',exact:true}).click();await page.locator('.construction-frame-warning').waitFor();
       const before=await cad(id,'document.view'),bounds=await page.getByTestId('cad-viewport').boundingBox();await page.mouse.click(bounds.x+bounds.width*.5,bounds.y+bounds.height*.5);await page.mouse.move(bounds.x+bounds.width*.6,bounds.y+bounds.height*.4);
       assert.equal(await page.locator('.drag-modeling-feedback').count(),0);assert.equal((await cad(id,'document.view')).stateToken,before.stateToken);
       await page.getByRole('button',{name:'参数建模',exact:true}).click();await close();await pickFace();const panel=await editCoordinate('Broken frame');await panel.getByRole('status').filter({hasText:'引用失效'}).waitFor();
