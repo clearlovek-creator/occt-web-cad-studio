@@ -14,7 +14,7 @@ function Branch({ label, actions, children, icon, onEdit, searching = false, hid
   const open = searching || expanded;
   return <li role="treeitem" aria-selected={false} aria-expanded={open} hidden={hidden}><ContextActions label={label} actions={[...actions, { label: open ? "折叠节点" : "展开节点", run: () => setExpanded(!expanded) }]}>
     {onEdit && <button type="button" className="tree-branch-toggle" aria-label={`${open?"折叠":"展开"}${label}`} aria-expanded={open} onClick={()=>setExpanded(!expanded)}>{open?"▾":"▸"}</button>}
-    <button className="managed-tree-label" onClick={event=>{if(!onEdit)setExpanded(!expanded);else if(event.detail===0)onEdit();}} onDoubleClick={onEdit} onKeyDown={event=>{if(onEdit && ["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();setExpanded(event.key==="ArrowRight");}}}>
+    <button type="button" className="managed-tree-label" aria-expanded={children ? open : undefined} onClick={event=>{if(!onEdit)setExpanded(!expanded);else if(event.detail===0)onEdit();}} onDoubleClick={onEdit} onKeyDown={event=>{if(children && !searching && ["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();setExpanded(event.key==="ArrowRight");}}}>
       {!onEdit && <span className="tree-toggle">{children ? (open ? "▾" : "▸") : ""}</span>}<StudioIcon name={icon} size={14} /><strong>{label}</strong>
     </button></ContextActions>{open && children && <ul role="group" className="managed-tree-branch">{children}</ul>}</li>;
 }

@@ -4,7 +4,7 @@ import {DEFAULT_CONSTRUCTION_GRID_STEP,type ConstructionFrame} from "./construct
 export function createConstructionGrid() {
   const grid = new THREE.GridHelper();
   const positions: number[] = [], colors: number[] = [];
-  const major = new THREE.Color(0xa0b4cc), minor = new THREE.Color(0xc5d3e4);
+  const major = new THREE.Color(0xa0adb5), minor = new THREE.Color(0xc6d0d6);
   const spacing = DEFAULT_CONSTRUCTION_GRID_STEP, halfSize = 60 * spacing, segmentLength = 3 * spacing;
   for (let offset = -halfSize; offset <= halfSize; offset += spacing) {
     const { r, g, b } = offset % (5 * spacing) === 0 ? major : minor;

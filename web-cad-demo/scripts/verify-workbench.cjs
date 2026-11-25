@@ -77,6 +77,54 @@ async function assertModelVisible() {
     const geometry = page.getByTestId('feature-tree');
     const close = async () => { const button = page.getByRole('button', { name: '关闭操作窗口', exact: true }); if (await button.count()) await button.click(); };
     const construction = page.getByRole('button', { name:'构造设置', exact:true });
+    await check('command search filters the ribbon, restores focus and opens the existing command', async () => {
+      const trigger = page.getByRole('button', {name:'查找命令', exact:true});
+      await trigger.click();
+      const dialog = page.getByRole('dialog', {name:'查找命令', exact:true});
+      const input = dialog.getByRole('combobox', {name:'命令名称或 ID'});
+      assert.equal(await input.evaluate(node => node === document.activeElement), true);
+      await input.fill('no-such-command-id');
+      await dialog.getByRole('status').filter({hasText:'未找到匹配命令'}).waitFor();
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({state:'hidden'});
+      assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+      await page.keyboard.press('Control+k');
+      await input.fill('project.workspaces');
+      const match = dialog.getByRole('option');
+      assert.equal(await match.count(), 1);
+      assert.equal(await match.getAttribute('aria-selected'), 'true');
+      await input.press('Enter');
+      await page.getByTestId('workspace-manager').waitFor();
+      await close();
+      await trigger.click();
+      await dialog.getByRole('button', {name:'关闭弹窗'}).click();
+      assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+    });
+    await check('floating-window controls preserve form state; Escape is scoped to the focused window', async () => {
+      await page.getByRole('tab', {name:'工程', exact:true}).click();
+      const trigger = page.locator('[data-command="project.workspaces"]');
+      await trigger.click();
+      const window = page.getByTestId('operation-window');
+      const field = window.getByLabel('查找工程', {exact:true});
+      await field.fill('保留筛选');
+      const right = await window.boundingBox();
+      await window.getByRole('button', {name:'移到视口左侧'}).click();
+      const left = await window.boundingBox();
+      assert.ok(left.x < right.x - 150);
+      await window.getByRole('button', {name:'最小化操作窗口'}).click();
+      assert.equal(await field.isVisible(), false);
+      assert.ok(Math.abs((await window.boundingBox()).y - left.y) < 2, 'Minimizing should not move the title bar');
+      await window.getByRole('button', {name:'展开操作窗口'}).click();
+      assert.equal(await field.inputValue(), '保留筛选');
+      await page.getByTestId('cad-viewport').focus();
+      await page.keyboard.press('Escape');
+      assert.equal(await window.count(), 1);
+      await field.focus();
+      await page.keyboard.press('Escape');
+      await window.waitFor({state:'detached'});
+      assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+      await page.getByRole('tab', {name:'建模', exact:true}).click();
+    });
     await check('one-line viewport controls and a usable narrow viewport with the assistant', async () => {
       await page.setViewportSize({ width: 1600, height: 960 });
       const centerY = async (locator) => { const r = await locator.boundingBox(); assert.ok(r); return r.y + r.height / 2; };
@@ -112,9 +160,38 @@ async function assertModelVisible() {
       await settings.click();
       assert.equal(await construction.getAttribute('aria-expanded'), 'false');
       await page.getByRole('button', { name:'恢复全部面板', exact:true }).click();
+      assert.ok(await settings.evaluate(el => el === document.activeElement));
       await page.unroute('**/api/pi/sessions**');
       await page.setViewportSize({ width: 1440, height: 960 });
       await assertModelVisible();
+    });
+    await check('model service settings fit the tablet viewport and confirm destructive actions', async () => {
+      const response = await fetch(api + '/agent/providers', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:'dialog-fixture-provider', name:'Dialog Fixture', baseUrl:'https://example.invalid/v1', model:'fixture-model' }) });
+      const payload = await response.json();
+      assert.equal(payload.ok,true);
+      const id = payload.provider.id;
+      await page.setViewportSize({width:768,height:700});
+      await page.getByRole('button',{name:'查找命令',exact:true}).click();
+      const query=page.getByRole('dialog',{name:'查找命令',exact:true}).getByRole('combobox');
+      await query.fill('model.agentSettings');
+      await query.press('Enter');
+      const settings=page.getByTestId('agent-provider-settings');
+      const config = settings.getByRole('combobox').first();
+      await config.locator(`option[value="${id}"]`).waitFor({state:'attached'});
+      await config.selectOption(id);
+      const remove=settings.getByRole('button',{name:'删除当前配置',exact:true});
+      await remove.click();
+      const dialog=page.getByRole('dialog',{name:'删除模型服务配置',exact:true});
+      await dialog.getByText('Dialog Fixture',{exact:true}).waitFor();
+      await page.keyboard.press('Escape');
+      const configs=()=>fetch(api+'/agent/providers').then(response=>response.json());
+      assert.equal((await configs()).providers.some(provider=>provider.id===id),true);
+      await remove.click();
+      await dialog.getByRole('button',{name:'确认删除配置'}).click();
+      await dialog.waitFor({state:'detached'});
+      assert.equal((await configs()).providers.some(provider=>provider.id===id),false);
+      await close();
+      await page.setViewportSize({width:1440,height:960});
     });
     await check('tree menu toggle and Escape leave the active editor open', async () => {
       const more = project.locator('.tree-more').first();
@@ -465,6 +542,10 @@ async function assertModelVisible() {
       await mesh.getByRole('button',{name:'开始剖分（结果默认隐藏）',exact:true}).click();const next=(await (await submission).json()).meshJob;
       await mesh.locator('a.mesh-download[href*="'+next.jobId+'"]').waitFor({timeout:60000});
       await mesh.locator('.mesh-task-history summary').click();assert.equal(await mesh.locator('li[data-state="complete"]').count(),2);
+      const filter = mesh.getByLabel('任务状态', {exact:true});
+      await filter.selectOption('failed');
+      await mesh.getByText('没有符合当前状态的网格任务。',{exact:true}).waitFor();
+      await filter.selectOption('all');
       await mesh.locator(`li[data-job-id="${first.jobId}"]`).getByRole('button',{name:'查看结果',exact:true}).click();
       await mesh.locator('a.mesh-download[href*="'+first.jobId+'"]').waitFor();
       assert.equal(await geometry.locator('.body-mesh-visibility-button[aria-pressed="true"]').count(),0);
@@ -806,7 +887,15 @@ async function assertModelVisible() {
       const naming = page.getByRole('dialog', {name:'保存前命名工程',exact:true});
       await naming.getByLabel('工程名称',{exact:true}).waitFor();
       assert.equal(await naming.getByRole('button',{name:'命名并保存'}).isDisabled(),true);
-      await naming.getByRole('button',{name:'取消',exact:true}).click();
+      await page.setViewportSize({width:320,height:280});
+      assert.equal(await naming.getByLabel('工程名称',{exact:true}).evaluate(node => node === document.activeElement),true);
+      assert.ok(await naming.evaluate(node => {
+        const r = node.getBoundingClientRect(), footer = node.querySelector('.dialog-footer').getBoundingClientRect();
+        return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && footer.bottom <= innerHeight &&
+          getComputedStyle(node.querySelector('.dialog-body')).overflowY === 'auto';
+      }), 'At 320×280 the name prompt must keep its actions in view');
+      await naming.getByRole('button',{name:'关闭弹窗',exact:true}).click();
+      await page.setViewportSize({width:1440,height:960});
       assert.equal((await (await fetch(api+'/projects/'+fixtureDocument)).json()).project.name,'未命名工程');
       await page.getByRole('tab',{name:'数据',exact:true}).click();
       await page.locator('[data-command="file.exchange"]').click();
@@ -1161,7 +1250,15 @@ async function assertModelVisible() {
     await check('missing-variable creation and its geometry commit are one transaction and one Undo',async()=>{
       await page.locator('[data-command="primitive.box"]').click();const editor=page.getByTestId('advanced-modeling-panel'),before=await command('document.summary');
       await editor.getByLabel('长度 X',{exact:true}).fill('sessionWidth');await editor.getByLabel('高度 Z',{exact:true}).fill('7');await editor.getByRole('button',{name:'创建基础体',exact:true}).click();await editor.getByRole('dialog',{name:'创建缺失变量',exact:true}).waitFor();
-      const batch=page.waitForResponse(r=>r.url().endsWith('/command-batches') && r.request().method()==='POST');await editor.getByRole('button',{name:'创建并重试',exact:true}).click();const result=await (await batch).json();assert.equal(result.ok,true,JSON.stringify(result));
+      const missing = editor.getByRole('dialog',{name:'创建缺失变量',exact:true});
+      const expression = missing.getByLabel('表达式',{exact:true});
+      assert.equal(await expression.evaluate(node => node === document.activeElement),true);
+      await expression.press('Escape');
+      await missing.waitFor({state:'detached'});
+      assert.equal(await editor.getByLabel('长度 X',{exact:true}).inputValue(),'sessionWidth');
+      await editor.getByRole('button',{name:'创建基础体',exact:true}).click();
+      await expression.waitFor();
+      const batch=page.waitForResponse(r=>r.url().endsWith('/command-batches') && r.request().method()==='POST');await expression.press('Enter');const result=await (await batch).json();assert.equal(result.ok,true,JSON.stringify(result));
       await page.waitForFunction(count=>Number(document.querySelector('[data-testid="cad-viewport"]').dataset.attachedBodies)>count,before.bodyCount);const saved=await command('document.summary');assert.equal(saved.bodyCount,before.bodyCount+1);assert.equal(saved.variables.find(v=>v.name==='sessionWidth').value,10);await close();
       const undone=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON()?.operation==='document.undo');await page.getByRole('button',{name:'撤销',exact:true}).click();assert.equal((await (await undone).json()).ok,true);const restored=await command('document.summary');assert.equal(restored.bodyCount,before.bodyCount);assert.equal(restored.variables.some(v=>v.name==='sessionWidth'),false);
     });

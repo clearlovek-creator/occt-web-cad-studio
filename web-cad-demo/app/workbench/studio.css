@@ -174,7 +174,6 @@
 .studio-view-cube button:first-child { grid-column: 1/-1; border-bottom: 1px solid #d0dded; }
 .studio-view-cube button:last-child { border-left: 1px solid #d0dded; }
 .studio-view-cube button:hover { background: #c8dff9; }
-.cad-shell .viewport-panel > .operation-window.minimized { top: 70px; }
 .studio-view-axes { position: absolute; bottom: 22px; left: 12px; z-index: 1; width: 74px; height: 74px; pointer-events: none; }
 .studio-view-axes :is(.axis-x,.axis-y,.axis-z) { stroke-width: 2.4px; }
 .studio-view-axes .axis-x { color: #c43f41; }
@@ -224,5 +223,3 @@
 .workbench-confirmation::backdrop { background: rgb(11 22 40 / 42%); }
 .workbench-confirmation h2 { margin: 0 0 12px; font-size: 15px; }
 .workbench-confirmation p { overflow-wrap: anywhere; }
-.workbench-confirmation .exchange-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; margin-top: 12px; }
-.workbench-confirmation .exchange-actions button { min-height: 34px; padding-inline: 10px; font-size: 12px; }

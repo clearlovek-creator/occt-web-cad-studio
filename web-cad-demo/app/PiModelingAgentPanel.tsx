@@ -65,6 +65,7 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted }: Props
   const currentStop=stopState?.documentId===documentId?stopState:null;
   const stopWaiting=Boolean(currentStop&&(['sending','uncertain','refreshing'].includes(currentStop.phase)||currentStop.phase==='checking'&&(busy||modelingPending)));
   const [changingConversation,setChangingConversation]=useState(false);
+  const [deleteConversationError,setDeleteConversationError]=useState<string|null>(null);
   const controlsBusy=busy||modelingPending||stopWaiting||transferring||changingConversation;
   const [connectionPhase,setConnectionPhase]=useState<PiConnectionPhase>('connecting');
   const [approvalBinding,setApprovalBinding]=useState<PiApprovalBinding|null>(null);
@@ -302,15 +303,25 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted }: Props
     if(controlsBusy||!connected)return;
     const owner=connectionRef.current;
     setChangingConversation(true);setError(null);
+    let deleted = false;
     try{
       await sendCommand({type:deleting?'delete_conversation':'restore_conversation',conversationId:target.id});
+      deleted = deleting;
       if(owner!==connectionRef.current)return;
       if(deleting&&target.active)await refreshMessages();
       const {data}=await sendCommand({type:'list_conversations'});
       if(owner!==connectionRef.current)return;
       setHistory(data?.conversations as PiConversation[]);
-    }catch(reason){if(owner===connectionRef.current)setError(reason instanceof Error?reason.message:'操作结果未确认，请重新打开历史对话核对。');}
-    finally{setDeleteCandidate(null);setChangingConversation(false);}
+    }catch(reason){
+      if(owner!==connectionRef.current)return;
+      const message=reason instanceof Error?reason.message:'操作结果未确认，请重新打开历史对话核对。';
+      if(deleting&&!deleted)setDeleteConversationError(message);
+      else setError(deleted?`对话已删除，但历史列表未刷新。请重新打开历史对话核对。 ${message}`:message);
+    }
+    finally{
+      if(deleted||owner!==connectionRef.current)setDeleteCandidate(null);
+      setChangingConversation(false);
+    }
   };
 
   const applyConfiguration = async (providerId?: string) => {
@@ -364,7 +375,7 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted }: Props
         <ul>{availableHistory.map(item=><li key={item.id}>
           <div><strong title={item.title}>{item.title||'未命名对话'}</strong><time dateTime={item.updatedAt}>{new Date(item.updatedAt).toLocaleString('zh-CN')}</time></div>
           <button type="button" disabled={item.active||controlsBusy} onClick={()=>void changeConversation(item.id)}>{item.active?'当前':'恢复对话'}</button>
-          <button type="button" className="pi-history-delete" disabled={controlsBusy} onClick={()=>setDeleteCandidate(item)}>删除</button>
+          <button type="button" className="pi-history-delete" disabled={controlsBusy} onClick={()=>{setDeleteConversationError(null);setDeleteCandidate(item);}}>删除</button>
         </li>)}</ul>}
       {connected&&deletedHistory.length>0&&<details>
         <summary>已删除对话（{deletedHistory.length}）</summary>
@@ -374,11 +385,14 @@ export function PiModelingAgentPanel({ revision, selection, onCommitted }: Props
         </li>)}</ul>
       </details>}
       <button type="button" onClick={showRecovery}>会话归属与备份</button>
-      {deleteCandidate&&<WorkbenchDialog title="删除历史对话" busy={changingConversation} onCancel={()=>setDeleteCandidate(null)}>
+      {deleteCandidate&&<WorkbenchDialog title="删除历史对话" busy={changingConversation} onCancel={()=>setDeleteCandidate(null)} actions={<>
+        <button type="button" data-initial-focus onClick={()=>setDeleteCandidate(null)}>{deleteConversationError?'关闭':'取消'}</button>
+        <button type="button" className="feature-delete-confirm" disabled={controlsBusy||!connected||!!deleteConversationError} onClick={()=>void changeConversationDeletion(deleteCandidate,true)}>确认删除对话</button>
+      </>}>
         <p><strong>{deleteCandidate.title||'未命名对话'}</strong></p>
         <p>对话和图片将移入「已删除对话」，可从那里恢复。</p>
         {deleteCandidate.active&&<p>删除当前对话后会进入新会话。</p>}
-        <div className="exchange-actions"><button type="button" className="feature-delete-confirm" disabled={controlsBusy||!connected} onClick={()=>void changeConversationDeletion(deleteCandidate,true)}>确认删除对话</button><button type="button" data-initial-focus disabled={changingConversation} onClick={()=>setDeleteCandidate(null)}>取消</button></div>
+        {deleteConversationError&&<p className="property-error" role="alert">{deleteConversationError} 关闭弹窗后，请重新打开历史对话核对状态。</p>}
       </WorkbenchDialog>}
     </section>}
     {pane==='settings'&&<div className="pi-agent-options"><AgentProviderSettingsPanel activeModel={activeModel} disabled={controlsBusy||!connected} onApply={applyConfiguration}/></div>}

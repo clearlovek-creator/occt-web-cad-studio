@@ -1,6 +1,7 @@
 "use client";
 
-import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { StudioIcon } from "./StudioIcon";
 
 export function OperationWindow({
   title,
@@ -8,15 +9,19 @@ export function OperationWindow({
   onClose,
   children,
   docked = false,
+  wide = false,
 }: {
   title: string;
   subtitle: string;
   onClose: () => void;
   children: ReactNode;
   docked?: boolean;
+  wide?: boolean;
 }) {
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [minimized, setMinimized] = useState(false);
+  const [side, setSide] = useState<"left" | "right">("right");
+  const bodyId = useId();
   const panelRef = useRef<HTMLElement>(null);
   const dragRef = useRef<{ x: number; y: number; originX: number; originY: number; minX: number; maxX: number; minY: number; maxY: number } | null>(null);
 
@@ -30,16 +35,6 @@ export function OperationWindow({
     };
   }, []);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || event.repeat || event.isComposing || panelRef.current?.closest("[hidden]")) return;
-      if (event.target instanceof Element && event.target.closest("select, dialog[open]")) return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
   useEffect(() => {
     if (docked) return;
     const panel = panelRef.current;
@@ -91,22 +86,34 @@ export function OperationWindow({
   return (
     <section
       ref={panelRef}
-      className={`operation-window${minimized ? " minimized" : ""}${docked ? " docked-operation" : ""}`}
+      className={`operation-window${minimized ? " minimized" : ""}${docked ? " docked-operation" : ""}${wide && !docked ? " wide-operation" : ""}`}
       style={docked ? undefined : { transform: `translate(${offset.x}px, ${offset.y}px)` }}
+      data-side={docked ? undefined : side}
       role="dialog"
       aria-modal="false"
       aria-label={title}
       tabIndex={-1}
       data-testid="operation-window"
+      onKeyDown={event => {
+        if (event.key !== "Escape" || event.defaultPrevented || event.repeat || event.nativeEvent.isComposing) return;
+        if (!(event.target instanceof Element) || !event.currentTarget.contains(event.target) || event.target.closest("select, dialog[open]")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
     >
       <header className="operation-window-header" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={() => { dragRef.current = null; }}>
-        <div><strong>{title}</strong><small>{subtitle}</small></div>
+        <div className="operation-window-caption"><strong>{title}</strong><small title={subtitle}>{subtitle}</small></div>
         <div className="operation-window-controls">
-          <button type="button" onClick={() => setMinimized((value) => !value)} aria-label={minimized ? "展开操作窗口" : "最小化操作窗口"}>{minimized ? "□" : "—"}</button>
-          <button type="button" onClick={onClose} aria-label="关闭操作窗口">×</button>
+          {!docked && <button type="button" className="operation-window-reposition" aria-label={side === "right" ? "移到视口左侧" : "移到视口右侧"} title={side === "right" ? "移到视口左侧" : "移到视口右侧"} onClick={() => {
+            setSide(side === "right" ? "left" : "right");
+            setOffset({ x: 0, y: 0 });
+          }}><StudioIcon name={side === "right" ? "dockLeft" : "dockRight"} /></button>}
+          <button type="button" onClick={() => setMinimized((value) => !value)} aria-expanded={!minimized} aria-controls={bodyId} aria-label={minimized ? "展开操作窗口" : "最小化操作窗口"} title={minimized ? "展开" : "最小化"}><StudioIcon name={minimized ? "expand" : "minus"} /></button>
+          <button type="button" onClick={onClose} aria-label="关闭操作窗口" title="关闭（Esc）"><StudioIcon name="close" /></button>
         </div>
       </header>
-      <div className="operation-window-body" hidden={minimized}>{children}</div>
+      <div className="operation-window-body" id={bodyId} hidden={minimized}>{children}</div>
     </section>
   );
 }

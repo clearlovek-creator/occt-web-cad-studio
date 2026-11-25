@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { modelingController } from "./modeling/runtime";
 import { useModelingController } from "./modeling/modeling-controller";
 import type { AgentProviderSummary } from "./modeling/modeling-controller";
+import { WorkbenchDialog } from "./workbench/WorkbenchDialog";
 
 type Form = Omit<AgentProviderSummary, 'apiKeyConfigured'> & { apiKey: string };
 export type PiModelConfiguration = { id: string; provider: string; baseUrl?: string; api?: string; input?: string[] };
@@ -17,6 +18,8 @@ export function AgentProviderSettingsPanel({activeModel, disabled, onApply}: Pro
   const [applying, setApplying] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleteCandidate, setDeleteCandidate] = useState<AgentProviderSummary | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const selected = state.agentProviders.find(item => item.id === (providerId ?? activeModel?.provider));
   const modelForm: Form = activeModel && providerId === null ? {
     ...emptyForm, name: activeModel.provider, baseUrl: activeModel.baseUrl ?? '', model: activeModel.id,
@@ -49,9 +52,15 @@ export function AgentProviderSettingsPanel({activeModel, disabled, onApply}: Pro
     catch (reason) { setError(reason instanceof Error ? reason.message : "连接测试失败。"); }
   };
   const remove = async () => {
+    if (!deleteCandidate || busy || selected?.id !== deleteCandidate.id) return;
     setError(null); setMessage(null);
-    try { await modelingController.deleteAgentProvider(form.id); setProviderId(''); setDraft(null); setMessage("Provider 已删除。"); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "Provider 删除失败。"); }
+    setDeleteError(null); setApplying(true);
+    try {
+      await modelingController.deleteAgentProvider(deleteCandidate.id);
+      setDeleteCandidate(null); setProviderId(''); setDraft(null); setMessage("模型服务配置已删除。");
+    }
+    catch (reason) { setDeleteError(reason instanceof Error ? reason.message : "模型服务配置删除失败。"); }
+    finally { setApplying(false); }
   };
 
   return <section className="panel-section" data-testid="agent-provider-settings">
@@ -68,8 +77,17 @@ export function AgentProviderSettingsPanel({activeModel, disabled, onApply}: Pro
     <label className="single-field"><span>路由优先级</span><input type="number" min="0" max="100" value={form.priority ?? 0} onChange={(event) => update("priority", Number(event.target.value))} /></label>
     <label className="inline-check"><input type="checkbox" checked={form.supportsImages === true} onChange={event=>update('supportsImages',event.target.checked)} />模型支持图片输入</label>
     <div className="exchange-actions"><button className="secondary-action" onClick={() => void save()} disabled={!form.model.trim()||!form.baseUrl.trim()}>{onApply?'保存并应用':'保存'}</button><button className="secondary-action" onClick={() => void test()} disabled={!selected || Boolean(draft)}>测试连接</button></div>
-    {selected && !onApply && <button className="secondary-action" onClick={() => void remove()}>删除当前 Provider</button>}
+    {selected && !onApply && <button type="button" className="secondary-action" onClick={() => { setDeleteError(null); setDeleteCandidate(selected); }}>删除当前配置</button>}
     </fieldset>
-    {(message || error || state.agentProviderError) && <p className={error || state.agentProviderError ? "property-error" : "exchange-message"}>{error || state.agentProviderError || message}</p>}
+    {(message || error || state.agentProviderError) && <p role={error || state.agentProviderError ? "alert" : "status"} className={error || state.agentProviderError ? "property-error" : "exchange-message"}>{error || state.agentProviderError || message}</p>}
+    {deleteCandidate && <WorkbenchDialog title="删除模型服务配置" busy={Boolean(busy)} onCancel={() => setDeleteCandidate(null)} actions={<>
+      <button type="button" data-initial-focus onClick={() => setDeleteCandidate(null)}>取消</button>
+      <button type="button" className="feature-delete-confirm" disabled={selected?.id !== deleteCandidate.id} onClick={() => void remove()}>确认删除配置</button>
+    </>}>
+      <p><strong>{deleteCandidate.name || deleteCandidate.id}</strong> · {deleteCandidate.model}</p>
+      <p>将删除此平台保存的服务配置，不会删除工程或历史对话。</p>
+      {draft && <p>当前配置中未保存的修改也会丢失。</p>}
+      {deleteError && <p role="alert" className="property-error">{deleteError}</p>}
+    </WorkbenchDialog>}
   </section>;
 }

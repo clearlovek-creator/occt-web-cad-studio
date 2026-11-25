@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CoordinateSystemData, MaterialData, ScalarVariableData } from "./ProjectDataPanel";
 import type { DirectModelResult } from "./DirectModelingPanel";
 import type { PrimitiveKind, SurfaceKind, TransformKind } from "./workbench/ribbon-catalog";
+import { MissingVariableEditor } from "./workbench/MissingVariableEditor";
 import {useEditorCommands} from "./modeling/CommandEditScope";
 import {CONSTRUCTION_AXES,CONSTRUCTION_PLANES,type ConstructionPlane} from "./modeling/construction-frame";
 
@@ -91,7 +92,7 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [missingVariable, setMissingVariable] = useState<string | null>(null);
-  const [variableType, setVariableType] = useState("length");
+  const [variableType, setVariableType] = useState<ScalarVariableData["type"]>("length");
   const [variableExpression, setVariableExpression] = useState("10 mm");
   const [pendingRequest, setPendingRequest] = useState<ModelingCommandInput | null>(null);
   const coordinates = useMemo(() => model?.coordinateSystems?.length ? model.coordinateSystems : [{ id: "global", name: "Global" } as CoordinateSystemData], [model]);
@@ -195,7 +196,11 @@ export function AdvancedModelingPanel({ model, onModel, mode = "all", initialPri
       <button className="secondary-action" disabled={busy || !model?.bodyId} onClick={executeTransform}>{busy ? "正在处理…" : "执行变换"}</button>
     </>}
     <p className="panel-copy">参数支持常数、单位和变量表达式，例如 <code>width + 2 * clearance</code>。</p>
-    {message && <p className="exchange-message" role="status">{message}</p>}
-    {missingVariable && <div className="inline-dialog" role="dialog" aria-label="创建缺失变量"><h3>未定义变量：{missingVariable}</h3><p>{busy?'变量与几何正在作为同一任务处理；如需停止，请使用下方任务状态区的“取消操作”。':'请核对变量类型和初始值。创建后将自动重试刚才的建模操作；复杂表达式中的变量类型需要手动判断。'}</p><label><span>类型</span><select disabled={busy} value={variableType} onChange={(event) => { const type = event.target.value; setVariableType(type); setVariableExpression((current) => ["10 mm", "10 deg", "1"].includes(current) ? (type === "angle" ? "10 deg" : type === "length" ? "10 mm" : "1") : current); }}><option value="length">长度</option><option value="angle">角度</option><option value="dimensionless">无量纲</option><option value="integer">整数</option></select></label><label><span>表达式</span><input disabled={busy} value={variableExpression} onChange={(event) => setVariableExpression(event.target.value)} /></label><div className="dialog-actions"><button disabled={busy} title={busy?'请使用任务状态区取消整个建模任务。':'仅关闭补充信息，不创建变量。'} onClick={() => { setMissingVariable(null); setPendingRequest(null); }}>取消</button><button className="primary-action" disabled={busy || !model || !variableExpression.trim()} onClick={() => void createMissingVariable()}>创建并重试</button></div></div>}
+    {message && !missingVariable && <p className="exchange-message" role="status">{message}</p>}
+    {missingVariable && <MissingVariableEditor name={missingVariable} type={variableType} expression={variableExpression} busy={busy} canSubmit={!!model} message={message}
+      onType={type => { setVariableType(type); setVariableExpression(current => ["10 mm", "10 deg", "1"].includes(current) ? (type === "angle" ? "10 deg" : type === "length" ? "10 mm" : "1") : current); setMessage(null); }}
+      onExpression={expression => { setVariableExpression(expression); setMessage(null); }}
+      onCancel={() => { setMissingVariable(null); setPendingRequest(null); setMessage(null); }}
+      onSubmit={() => void createMissingVariable()} />}
   </section>;
 }

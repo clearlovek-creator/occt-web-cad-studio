@@ -995,8 +995,8 @@ html, body { background: var(--cad-bg); color: var(--cad-text); font: 12px "Sego
 .mesh-diagnostic-issues li[data-severity="warning"] { border-left-color: var(--cad-warning); }
 .mesh-diagnostic-issues li div { min-width: 0; overflow-wrap: anywhere; }
 .mesh-diagnostic-issues small { display: block; margin-top: 4px; color: var(--cad-text-3); }
-.preparation-preview-banner { position: absolute; left: 72px; top: 12px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; border: 1px solid var(--cad-accent); background: var(--cad-surface); color: var(--cad-accent); font-size: 12px; }
-.preparation-preview-banner button { border: 1px solid var(--cad-border); padding: 4px 8px; background: var(--cad-surface-2); color: var(--cad-text); cursor: pointer; }
+.preparation-preview-banner { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; min-width: 0; padding: 5px 8px; border-top: 1px solid var(--cad-border); background: var(--cad-surface); color: var(--cad-accent); font-size: 12px; }
+.preparation-preview-banner button { border: 1px solid var(--cad-border); min-height: 28px; padding: 4px 8px; background: var(--cad-surface-2); color: var(--cad-text); cursor: pointer; }
 .quality-selection-readout { position: absolute; left: 12px; bottom: 52px; z-index: 3; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 24px); padding: 8px 12px; border: 1px solid var(--cad-border-strong); border-left: 3px solid var(--cad-warning); border-radius: 4px; background: var(--cad-surface); color: var(--cad-text); font-size: 12px; }
 .quality-selection-readout > div { display: grid; gap: 4px; min-width: 0; }
 .quality-selection-readout strong { overflow-wrap: anywhere; }

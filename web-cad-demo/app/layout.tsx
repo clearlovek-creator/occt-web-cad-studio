@@ -2,6 +2,7 @@
 import "./globals.css";
 import "./workbench/workbench.css";
 import "./workbench/studio.css";
+import "./workbench/design-system.css";
 
 export const metadata: Metadata = {
   title: "OCCT Web Studio",

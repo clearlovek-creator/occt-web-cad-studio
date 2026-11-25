@@ -67,14 +67,13 @@ export function ProjectBackupPanel({documentId,busy}:{documentId:string;busy:boo
     {catalog?.nextCursor&&<button type="button" className="backup-more" disabled={blocked} onClick={()=>void load(catalog.nextCursor!)}>加载更早的备份</button>}
     <p className="panel-copy">“删除备份文件”仅删除后台这一份文件，不删除当前工程；异常材料须先核对清单，再显式清理。此处不自动生成备份。</p>
     {notice&&<p className="backup-notice" role="status">{notice}</p>}{error&&<p className="exchange-message" role="alert">{error}</p>}
-    {deleteCandidate?.receipt && <WorkbenchDialog title="删除备份文件" onCancel={() => setDeleteCandidate(null)}>
+    {deleteCandidate?.receipt && <WorkbenchDialog title="删除备份文件" onCancel={() => setDeleteCandidate(null)} actions={<>
+      <button type="button" data-initial-focus onClick={() => setDeleteCandidate(null)}>取消</button>
+      <button type="button" className="feature-delete-confirm" disabled={blocked} onClick={confirmRemoval}>确认删除文件</button>
+    </>}>
       <p><strong>{deleteCandidate.receipt.projectBackup.fileName}</strong></p>
       <p>R{deleteCandidate.receipt.revision} · {new Date(deleteCandidate.receipt.projectBackup.createdAt).toLocaleString('zh-CN')}</p>
       <p>此操作会永久删除后台的这一份备份，原工程和建模历史仍可继续使用。</p>
-      <div className="exchange-actions">
-        <button type="button" className="feature-delete-confirm" disabled={blocked} onClick={confirmRemoval}>确认删除文件</button>
-        <button type="button" data-initial-focus onClick={() => setDeleteCandidate(null)}>取消</button>
-      </div>
     </WorkbenchDialog>}
     </>}
   </section>;

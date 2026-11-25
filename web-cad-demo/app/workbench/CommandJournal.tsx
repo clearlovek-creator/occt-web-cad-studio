@@ -31,6 +31,7 @@ export function CommandJournal({ documentId, active, entries, onClear, onClearTa
     }>;
 }) {
     const [failuresOnly, setFailuresOnly] = useState(false);
+    const [query, setQuery] = useState("");
     const [copyState, setCopyState] = useState("");
     const [clearing, setClearing] = useState(false), [cleanupNotice, setCleanupNotice] = useState('');
     const [saved, setSaved] = useState<CommandLogEntry[]>([]);
@@ -73,7 +74,12 @@ export function CommandJournal({ documentId, active, entries, onClear, onClearTa
                 message: record.status === local?.status ? local.message : undefined});
         }
     }
-    const visible = [...merged.values()].filter(entry => !failuresOnly || entry.status === 'error').sort((a, b) => b.startedAt - a.startedAt);
+    const filter = query.toLowerCase().trim();
+    const visible = [...merged.values()].filter(entry => {
+        if (failuresOnly && entry.status !== 'error') return false;
+        return !filter || [entry.operation, entry.requestId, entry.taskId, entry.code, entry.message]
+            .some(value => value?.toLowerCase().includes(filter));
+    }).sort((a, b) => b.startedAt - a.startedAt);
 
     const updateJournal = async (entry?: CommandLogEntry) => {
         if (actionRef.current) return;
@@ -112,8 +118,8 @@ export function CommandJournal({ documentId, active, entries, onClear, onClearTa
         }
     };
     return <section className="command-journal" aria-label="命令执行日志" data-testid="command-journal">
-    <div className="command-journal-toolbar"><label><input type="checkbox" checked={failuresOnly} onChange={(event) => setFailuresOnly(event.target.checked)}/>仅失败</label><span>当前工程</span><button type="button" onClick={() => void copy()}>{copyState || "复制诊断"}</button><button type="button" disabled={action !== null} title="清除当前工程已完成、失败或取消的命令记录。" onClick={() => void updateJournal()}>清除已完成</button>{onClearTasks && <button type="button" disabled={clearing} title="清除当前工程已结束的后台任务记录。" onClick={() => { setClearing(true); void onClearTasks().then(result => setCleanupNotice(`已清理 ${result.deleted ?? 0} 项记录${result.retained ? `，${result.retained} 项需检查` : ''}`)).catch(reason => setCleanupNotice(reason instanceof Error ? reason.message : '任务记录清理未完成。')).finally(() => setClearing(false)); }}>{clearing ? '清理中' : '清理后台已完成任务'}</button>}{cleanupNotice && <span role="status">{cleanupNotice}</span>}{(journalNotice || syncError) && <span role="status">{journalNotice || syncError}</span>}</div>
-    <div className="command-journal-list">{!visible.length ? <p>暂无{failuresOnly ? "失败" : "命令"}记录</p> : visible.map((entry) => <details key={entryKey(entry)} className={`command-journal-entry ${entry.status}`}>
+    <div className="command-journal-toolbar"><input type="search" aria-label="搜索命令日志" placeholder="命令、请求 ID 或错误码" value={query} onChange={event => { setQuery(event.target.value); setCopyState(""); }} /><label><input type="checkbox" checked={failuresOnly} onChange={(event) => { setFailuresOnly(event.target.checked); setCopyState(""); }}/>仅失败</label><span>{visible.length} 条记录</span><button type="button" disabled={!visible.length} onClick={() => void copy()}>{copyState || "复制诊断"}</button><button type="button" disabled={action !== null} title="清除当前工程已完成、失败或取消的命令记录。" onClick={() => void updateJournal()}>清除已完成</button>{onClearTasks && <button type="button" disabled={clearing} title="清除当前工程已结束的后台任务记录。" onClick={() => { setClearing(true); void onClearTasks().then(result => setCleanupNotice(`已清理 ${result.deleted ?? 0} 项记录${result.retained ? `，${result.retained} 项需检查` : ''}`)).catch(reason => setCleanupNotice(reason instanceof Error ? reason.message : '任务记录清理未完成。')).finally(() => setClearing(false)); }}>{clearing ? '清理中' : '清理后台已完成任务'}</button>}{cleanupNotice && <span role="status">{cleanupNotice}</span>}{(journalNotice || syncError) && <span role="status">{journalNotice || syncError}</span>}</div>
+    <div className="command-journal-list">{!visible.length ? <p>{filter ? "没有匹配的命令记录" : `暂无${failuresOnly ? "失败" : "命令"}记录`}</p> : visible.map((entry) => <details key={entryKey(entry)} className={`command-journal-entry ${entry.status}`}>
       <summary><time dateTime={new Date(entry.startedAt).toISOString()} title={new Date(entry.startedAt).toLocaleString("zh-CN")}>{new Date(entry.startedAt).toLocaleTimeString("zh-CN", { hour12: false })}</time><strong>{entry.operation}</strong><span>{entry.status === "running" ? "执行中" : entry.status === "unknown" ? "待核对" : entry.status === "cancelled" ? '已取消' : entry.status === "error" ? entry.code === 'MODELING_TASK_RECEIPT_UNAVAILABLE' ? '已提交 · 待同步' : "失败" : entry.warningCount ? `完成 · ${entry.warningCount} 条警告` : "完成"}</span><span>{entry.durationMs === undefined ? "—" : `${entry.durationMs} ms`}</span>{entry.revision !== undefined && <span>R{entry.revision}</span>}</summary>
       <dl><dt>请求 ID</dt><dd>{entry.requestId}</dd><dt>工程 ID</dt><dd>{entry.documentId}</dd>{entry.taskId && <><dt>任务 ID</dt><dd>{entry.taskId}</dd></>}{entry.code && <><dt>错误码</dt><dd>{entry.code}</dd></>}{entry.message && <><dt>详情</dt><dd>{entry.message}</dd></>}{entry.warnings?.length ? <><dt>警告</dt><dd>{entry.warnings.join("\n")}</dd></> : null}</dl>
       {unsettled(entry) && <button type="button" disabled={action !== null} onClick={() => void updateJournal(entry)}>核对结果</button>}

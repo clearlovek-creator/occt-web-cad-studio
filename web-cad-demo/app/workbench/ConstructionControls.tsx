@@ -21,6 +21,7 @@ export function ConstructionControls({coordinates,selectedId,plane,frame,error,g
     const escape=(event:KeyboardEvent)=>{
       if(event.key!=="Escape"||event.defaultPrevented||event.isComposing||(event.target instanceof Element&&event.target.closest("dialog[open]")))return;
       event.preventDefault();
+      if(event.repeat)return;
       setOpen(false);
       triggerRef.current?.focus({preventScroll:true});
     };
@@ -32,7 +33,9 @@ export function ConstructionControls({coordinates,selectedId,plane,frame,error,g
     };
   },[open]);
 
-  return <div className="construction-popover" ref={popoverRef}>
+  return <div className="construction-popover" ref={popoverRef} onBlur={event=>{
+    if(event.relatedTarget instanceof Node&&!event.currentTarget.contains(event.relatedTarget))setOpen(false);
+  }}>
     <button type="button" ref={triggerRef} className="construction-trigger" aria-label="构造设置" aria-expanded={open} aria-controls={open?popupId:undefined} title={error ?? `${coordinateName} · ${plane}`} onClick={()=>setOpen(value=>!value)}>
       构造 <span className="construction-summary"><span className="construction-coordinate-name">{coordinateName}</span>{plane}</span>
       {error&&<strong className="construction-frame-warning" aria-hidden="true">!</strong>}

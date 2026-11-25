@@ -11,6 +11,7 @@ import {editableNumberEntries} from "./modeling/feature-parameters";
 import type {FeatureRepairProposal} from "./modeling/feature-input";
 import {LoftModelingPanel,type LoftBodySummary} from "./LoftModelingPanel";
 import {SweepModelingPanel} from "./SweepModelingPanel";
+import { MissingVariableEditor } from "./workbench/MissingVariableEditor";
 
 type BooleanOperation =
   | "boolean.fuse"
@@ -430,15 +431,13 @@ export function FeatureHistoryControls({
           {!selectedBooleanDraft && <p className="panel-copy recompute-scope">参数支持数值、单位和标量变量表达式；面/边引用按真实拓扑来源追踪，缺失或歧义需显式修复。</p>}
         </fieldset>
       ) : <section aria-label="重新选择特征"><p className="panel-copy">{requestedFeature?`原特征 ${requestedFeature} 已不存在，不会自动改为编辑其他特征。请明确重新选择。`:"当前 Body 没有可编辑的实体特征。"}</p>{editable.length>0 && <select className="operation-select" aria-label="可编辑特征" value="" onChange={event=>selectFeature(event.target.value)}><option value="">选择要编辑的特征</option>{editable.map(feature=><option key={feature.id} value={feature.id}>{feature.id} · {feature.type}</option>)}</select>}</section>}
-      {message && !repairProposal && <p className="exchange-message">{message}</p>}
+      {message && !repairProposal && !missingVariable && <p className="exchange-message">{message}</p>}
       {missingVariable && (
-        <div className="inline-dialog" role="dialog" aria-label="创建缺失变量">
-          <h3>未定义变量：{missingVariable}</h3>
-          <p>创建变量后自动重试本次 Feature 修改。</p>
-          <label><span>类型</span><select value={variableType} onChange={(event) => setVariableType(event.target.value as ScalarVariable["type"])}><option value="length">Length</option><option value="angle">Angle</option><option value="dimensionless">Dimensionless</option><option value="integer">Integer</option></select></label>
-          <label><span>表达式</span><input value={variableExpression} onChange={(event) => setVariableExpression(event.target.value)} /></label>
-          <div className="dialog-actions"><button onClick={() => { setMissingVariable(null); setPendingRequest(null); }}>取消</button><button className="primary-action" disabled={busy || !variableExpression.trim()} onClick={() => void createMissingVariable()}>创建并重试</button></div>
-        </div>
+        <MissingVariableEditor name={missingVariable} type={variableType} expression={variableExpression} busy={busy} message={message}
+          onType={type => { setVariableType(type); setMessage(null); }}
+          onExpression={expression => { setVariableExpression(expression); setMessage(null); }}
+          onCancel={() => { setMissingVariable(null); setPendingRequest(null); setMessage(null); }}
+          onSubmit={() => void createMissingVariable()} />
       )}
     </section>
   );

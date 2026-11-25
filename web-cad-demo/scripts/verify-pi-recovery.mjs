@@ -120,6 +120,39 @@ try{
     await page.setViewportSize({width:1440,height:960});await details.locator('summary').click();await content.waitFor({state:'detached'});
     assert.equal((await request('/pi/sessions',{sessionId:'webcad-default',documentId:'default'})).streamId,generation);assert.equal(viewportReads-readsBefore,1,'Two oversized result hints must still reconcile one CAD call only once');assert.equal(log().filter(command=>command.type==='prompt'&&command.message.includes('fixture:large-result')).length,1);await page.screenshot({path:path.join(artifacts,'large-native-result.png'),fullPage:true});
   });
+  await check('Pi conversation deletion shows pending and rejected states inside the confirmation',async()=>{
+    const history = panel.getByRole('button',{name:'历史对话',exact:true});
+    await history.click();
+    const remove = panel.getByRole('region',{name:'Pi 历史对话'}).getByRole('button',{name:'删除',exact:true}).first();
+    await remove.click();
+    const dialog = page.getByRole('dialog',{name:'删除历史对话',exact:true});
+    const confirm = dialog.getByRole('button',{name:'确认删除对话'});
+    assert.equal(await dialog.getByRole('button',{name:'取消',exact:true}).evaluate(node=>node===document.activeElement),true);
+    let release;
+    const pending = new Promise(resolve=>{release=resolve;});
+    const pattern='**/api/pi/sessions/*/commands';
+    const rejectDeletion = async route=>{
+      if(route.request().postDataJSON()?.command?.type!=='delete_conversation')return route.fallback();
+      await pending;
+      await route.fulfill({status:409,json:{ok:false,error:'测试：对话删除未确认。'}});
+    };
+    await page.route(pattern,rejectDeletion);
+    try {
+      await confirm.click();
+      await dialog.getByRole('status').filter({hasText:'正在处理'}).waitFor();
+      assert.equal(await dialog.getByRole('button',{name:'关闭弹窗'}).isDisabled(),true);
+      await page.keyboard.press('Escape');
+      assert.equal(await dialog.isVisible(),true);
+      release();
+      await dialog.getByRole('alert').filter({hasText:'对话删除未确认'}).waitFor();
+      assert.equal(await confirm.isDisabled(),true);
+      await dialog.getByRole('button',{name:'关闭',exact:true}).click();
+      assert.equal(await remove.evaluate(node=>node===document.activeElement),true);
+    } finally {
+      release();
+      await page.unroute(pattern,rejectDeletion);
+    }
+  });
   const after=await summary();assert.equal(after.stateToken,expected.stateToken);assert.equal(after.revision,expected.revision);assert.equal(after.bodyCount,expected.bodyCount);assert.deepEqual(errors,[]);
   fs.writeFileSync(path.join(artifacts,'result.json'),JSON.stringify({ok:true,checks,scope:'real browser, SSE and Gateway restart; deterministic native Pi RPC fixture; explicit Box edits in isolated CAD data test viewport reconciliation; no paid LLM or automatic tool replay'},null,2));
   console.log(`${checks.length} real-browser Pi recovery checks passed; only explicit isolated CAD edits changed geometry.`);

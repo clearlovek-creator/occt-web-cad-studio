@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { API_ROOT } from "./api-config.ts";
 import {assessMeshDisplaySource} from './model/mesh-display-source';
 import {meshAdmitted,meshAdmissionLabel} from '../shared/mesh-admission.mjs';
@@ -62,6 +62,9 @@ export function MeshWorkbenchPanel({
   const qualityThreshold=tasks.setupQualityThreshold,setQualityThreshold=tasks.setSetupQualityThreshold;
   const currentSizingDraft=tasks.sizingDraft;
   const [busy, setBusy] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState("all");
+  const historyFilterId = useId();
+  const visibleJobs = historyFilter === "all" ? tasks.jobs : tasks.jobs.filter(job => job.state === historyFilter);
   const [createdResult, setResult] = useState<MeshJobPayload | null>(null);
   const candidate = latestResult || createdResult;
   const result = candidate?.meshJob.documentId === documentId&&(!tasks.selectedTetraId||tasks.selectedJobId===candidate.meshJob.jobId) ? candidate : null;
@@ -189,10 +192,17 @@ export function MeshWorkbenchPanel({
       <details className="mesh-task-history" ref={historyRef}>
         <summary>任务记录 · {catalogReady?tasks.jobs.length:tasks.catalog.state==='recovering'?'读取中':tasks.catalog.state==='unavailable'?'暂不可读':'未读取'}{catalogReady&&tasks.loading ? " · 载入中" : ""}</summary>
         {tasks.catalogRecovered&&catalogReady&&<p className="mesh-catalog-success" role="status">网格历史已重新读取，当前工程 {tasks.jobs.length} 条记录；未重新剖分。</p>}
-        {['ready','unknown'].includes(tasks.catalog.state)&&<button type="button" className="mesh-refresh-tasks" disabled={tasks.loading || tasks.busy} onClick={() => void tasks.refresh()}>刷新任务记录</button>}
+        <div className="mesh-history-filter">
+          {tasks.jobs.length > 0 && <><label htmlFor={historyFilterId}>任务状态</label><select id={historyFilterId} value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}>
+            <option value="all">全部</option>
+            {Object.entries(meshJobStateLabel).map(([state,label]) => <option key={state} value={state}>{label}</option>)}
+          </select></>}
+          {['ready','unknown'].includes(tasks.catalog.state)&&<button type="button" className="mesh-refresh-tasks" disabled={tasks.loading || tasks.busy} onClick={() => void tasks.refresh()}>刷新任务记录</button>}
+        </div>
         {!tasks.jobs.length && !tasks.loading && catalogReady&&<p>当前工程还没有剖分任务。</p>}
         {!catalogReady&&tasks.jobs.length>0&&<p>以下为上次读取记录，当前尚未重新核对。</p>}
-        <ul>{tasks.jobs.map(job => <li key={job.jobId} data-state={job.state} data-job-id={job.jobId} data-has-recovery={Boolean(job.completionRecovery||tasks.completionActions[job.jobId])||undefined} data-has-optimization={Boolean(job.optimizationAttempt)||undefined}>
+        {tasks.jobs.length > 0 && visibleJobs.length === 0 && <p role="status">没有符合当前状态的网格任务。</p>}
+        <ul>{visibleJobs.map(job => <li key={job.jobId} data-state={job.state} data-job-id={job.jobId} data-has-recovery={Boolean(job.completionRecovery||tasks.completionActions[job.jobId])||undefined} data-has-optimization={Boolean(job.optimizationAttempt)||undefined}>
           <div>
             <strong>{job.optimizationAttempt?'检查点优化 · ':job.kind==='surface-reconstruction'?'表面重构 · ':job.kind==='preparation'?'诊断预览 · ':job.kind==='discrete-tetra'?'交叉修复四面体 · ':''}{job.optimizationAttempt&&job.state==='running'?'优化中':job.optimizationAttempt&&job.state==='preparing'?'准备检查点':job.kind==='surface-reconstruction'&&job.state==='running'?'重构中':meshJobStateLabel[job.state]} · 来源 R{job.revision ?? "—"}</strong>
             {job.kind==='surface-reconstruction'?<small>仅表面 · 非体网格{job.surfaceSummary?` · ${job.surfaceSummary.inputTriangles} → ${job.surfaceSummary.outputTriangles} 三角面`:''}</small>:job.kind==='discrete-tetra'?<small>{job.state==='complete'&&job.derivation?tetraDerivationLabel[job.derivation.state]:job.optimizationRecovery?'检查点已保留 · 未发布可用网格':job.optimizationAttempt?'仅优化，不重新剖分':'未发布可用网格'}{job.discreteTetraSummary?` · ${job.discreteTetraSummary.tetraCount} 个四面体`:''}</small>:job.state==='complete'&&job.kind!=='preparation'&&<small>{meshAdmissionLabel(job.admission)}</small>}

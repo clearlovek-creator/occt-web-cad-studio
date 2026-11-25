@@ -16,6 +16,7 @@ import { FeatureHistoryControls } from "./FeatureHistoryControls";
 import {failedSelectionTarget} from "./FeatureReferenceRepair";
 import type {FeatureRepairProposal} from "./modeling/feature-input";
 import { CommandChrome } from "./workbench/CommandChrome";
+import { CommandSearch } from "./workbench/CommandSearch";
 import { CommandJournal, type JournalIdentity } from "./workbench/CommandJournal";
 import {ModelingTaskStatus} from './workbench/ModelingTaskStatus';
 import {StepImportStatus} from './workbench/StepImportStatus';
@@ -162,6 +163,7 @@ const defaultEdgeColor = 0x203040;
 const selectionColor = 0xffb14a;
 const selectionEmissive = 0x3a1b00;
 const dockedOperations = new Set<OperationKind>(["primitives", "surfaces", "transform", "boolean", "pattern", "patternCircular", "patternRectangular", "patternMirror", "fillet", "chamfer", "draft", "revolve", "offsetFeature", "generated", "history", "shapeCheck", "bodyAppearance"]);
+const wideOperations = new Set<OperationKind>(["mesh", "simulation", "workspace", "backups", "sources", "propertyTypes", "agentSettings"]);
 
 type DocumentOwner = { documentId: string; stateToken: string | null };
 type ProjectSwitch = DocumentOwner & { label: string; run: () => Promise<void> };
@@ -201,6 +203,18 @@ export default function CadDemo() {
   const axesRef = useRef<SVGSVGElement>(null);
   const [panelVisibility, setPanelVisibility] = useState(defaultStudioPanels);
   const [panelMenuOpen, setPanelMenuOpen] = useState(false);
+  const [commandSearchOpen, setCommandSearchOpen] = useState(false);
+  useEffect(() => {
+    function openCommandSearch(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.isComposing || event.repeat || event.altKey || event.shiftKey ||
+        !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k" || document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      setPanelMenuOpen(false);
+      setCommandSearchOpen(true);
+    }
+    document.addEventListener("keydown", openCommandSearch);
+    return () => document.removeEventListener("keydown", openCommandSearch);
+  }, []);
   const [treeQuery, setTreeQuery] = useState("");
   const panelMenuRef = useRef<HTMLDivElement>(null);
   const changePanel = useCallback((id: StudioPanel, visible: boolean) => {
@@ -211,6 +225,7 @@ export default function CadDemo() {
     setMessagesExpanded(true);
     setAgentOpen(false);
     setPanelMenuOpen(false);
+    panelMenuRef.current?.querySelector("button")?.focus({ preventScroll: true });
   }, []);
   useEffect(() => {
     if (!panelMenuOpen) return;
@@ -218,10 +233,11 @@ export default function CadDemo() {
       if (!panelMenuRef.current?.contains(event.target as Node)) setPanelMenuOpen(false);
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || (event.target instanceof Element && event.target.closest("dialog[open]"))) return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || (event.target instanceof Element && event.target.closest("dialog[open]"))) return;
       event.preventDefault();
+      if (event.repeat) return;
       setPanelMenuOpen(false);
-      panelMenuRef.current?.querySelector("button")?.focus();
+      panelMenuRef.current?.querySelector("button")?.focus({ preventScroll: true });
     };
     document.addEventListener("pointerdown", dismiss);
     document.addEventListener("keydown", escape, true);
@@ -1658,7 +1674,8 @@ export default function CadDemo() {
     if (!mount) return;
 
     const scene = new THREE.Scene();
-    const background = new THREE.Color("#e4ebf4");
+    const viewportColor = getComputedStyle(mount).getPropertyValue("--studio-viewport").trim();
+    const background = new THREE.Color(viewportColor || "#dce4e9");
     scene.background = background;
     const backgroundRgb = background.getRGB(new THREE.Color(), THREE.SRGBColorSpace);
     const countForeground = (pixels: Uint8Array) => {
@@ -3137,7 +3154,7 @@ export default function CadDemo() {
   const projectName = workspace.project?.name || "未命名工程";
   const operationDocked = activeOperation !== null && dockedOperations.has(activeOperation);
   const operationEditor = activeOperation && (
-    <OperationWindow docked={operationDocked} key={`${activeOperation}:${projectDataMode}`} title={activeOperation === "projectData" ? (projectDataMode === "variables" ? "变量" : projectDataMode === "materials" ? "材料" : "坐标系") : (["primitives", "surfaces", "transform", "boolean"].includes(activeOperation) ? WORKBENCH_TABS.flatMap((tab) => tab.groups.flatMap((group) => group.tools)).find((tool) => tool.id === activeTool)?.label || OPERATION_META[activeOperation].title : OPERATION_META[activeOperation].title)} subtitle={activeOperation === "projectData" ? "工程数据 · 独立编辑窗口" : OPERATION_META[activeOperation].subtitle} onClose={() => setActiveOperation(null)}>
+    <OperationWindow docked={operationDocked} wide={wideOperations.has(activeOperation)} key={`${activeOperation}:${projectDataMode}`} title={activeOperation === "projectData" ? (projectDataMode === "variables" ? "变量" : projectDataMode === "materials" ? "材料" : "坐标系") : (["primitives", "surfaces", "transform", "boolean"].includes(activeOperation) ? WORKBENCH_TABS.flatMap((tab) => tab.groups.flatMap((group) => group.tools)).find((tool) => tool.id === activeTool)?.label || OPERATION_META[activeOperation].title : OPERATION_META[activeOperation].title)} subtitle={activeOperation === "projectData" ? "工程数据 · 独立编辑窗口" : OPERATION_META[activeOperation].subtitle} onClose={() => setActiveOperation(null)}>
                 <CommandEditScope key={editorEpoch} enabled={Boolean(editableOperation)} session={editorSession} onReload={async()=>{const result=await modelingController.execute<ModelData>({operation:"document.view"});if(!modelingController.acceptsState(result))throw new Error("工程又发生了变化，请再次载入。");displayModel(result,{fitCamera:false});resetInlineEditorDrafts();if(["fillet","chamfer","draft","offsetFeature","revolve","generated"].includes(activeOperation)){clearHighlight();setSelectedId(null);setSelectedBodyId(null);setStatus("已重新载入，请在视口中重新选择输入面或边。");}setEditorEpoch(value=>value+1);}}>{operationContent()}</CommandEditScope>
               </OperationWindow>
   );
@@ -3149,10 +3166,12 @@ export default function CadDemo() {
 
   return (
     <main className="cad-shell" data-document-id={controllerState.documentId}>
+      <a className="studio-skip-link" href="#cad-viewport">跳到 3D 视口</a>
       <header className="desktop-titlebar">
         <div className="app-identity"><span className="app-mark" aria-hidden="true"><StudioIcon name="box" size={18} /></span><strong>OCCT Web Studio</strong></div>
         <div className="window-document"><button type="button" className="workspace-identity" aria-label="工程名称与恢复" onClick={()=>setActiveOperation("workspace")}><strong>{projectName}{workspace.project?.hasChangesSinceExport ? "*" : ""}</strong><small title={workspace.error || workspace.project?.recoveryWarning || "操作成功后的工程数据可由后台恢复；下载备份是独立文件。"}>R{model?.revision ?? "—"} · {workspace.error ? "工程状态不可用" : workspace.project && !workspace.project.recoverable ? "恢复快照不可用 · 请打开备份" : workspace.project?.recoveryWarning ? "工程已执行异常恢复 · 请核对数据" : workspace.project?.hasChangesSinceExport ? "后台恢复可用 · 有更改未生成备份" : workspace.project ? "备份包已生成 · 此后无新更改" : "正在读取工程状态"}</small></button></div>
         <div className="titlebar-actions" aria-label="常用操作"><button title="保存工程" aria-label="保存工程" disabled={!commandAvailability("file.save").enabled} onClick={() => void handleCommand("file.save")}><StudioIcon name="save" /></button><button title="撤销" aria-label="撤销" disabled={!commandAvailability("edit.undo").enabled} onClick={() => void handleCommand("edit.undo")}><StudioIcon name="undo" /></button><button title="重做" aria-label="重做" disabled={!commandAvailability("edit.redo").enabled} onClick={() => void handleCommand("edit.redo")}><StudioIcon name="redo" /></button><button className={agentOpen ? "active" : ""} aria-pressed={agentOpen} onClick={() => setAgentOpen(!agentOpen)}>AI 助手</button><button aria-label="大模型设置" title="大模型设置" onClick={() => setActiveOperation("agentSettings")}><StudioIcon name="settings" /></button><button aria-label="当前能力" title="当前能力" onClick={() => setActiveOperation("capabilities")}><StudioIcon name="help" /></button></div>
+        <button type="button" className="studio-command-search" aria-label="查找命令" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K" title="查找命令（Ctrl+K）" onClick={() => setCommandSearchOpen(true)}><StudioIcon name="search" size={16} /><span>查找命令</span><kbd>Ctrl K</kbd></button>
         <div className="window-state" role="status"><span className={`service-led${commandBusy ? " busy" : commandError ? " failed" : ""}`} />{commandBusy ? "正在处理" : commandError ? "操作未完成" : model ? "工作区就绪" : "等待模型"}</div>
       </header>
 
@@ -3238,9 +3257,11 @@ export default function CadDemo() {
               <button onClick={() => void handleCommand("view.iso")} aria-label="轴测视图" title="轴测视图"><StudioIcon name="iso" /></button>
               <button onClick={() => void handleCommand("view.screenshot")} disabled={!viewerReady} aria-label="截图" title="保存视口截图 PNG"><StudioIcon name="camera" /></button>
               <button className="render-all-button" onClick={() => void renderAllBodies()} disabled={busy || !model} title="加载全部 Body 的高精度 BRep">全量</button>
-              <div className="studio-panel-popover" ref={panelMenuRef}>
+              <div className="studio-panel-popover" ref={panelMenuRef} onBlur={event => {
+                if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) setPanelMenuOpen(false);
+              }}>
                 <button type="button" aria-expanded={panelMenuOpen} aria-controls={panelMenuOpen ? "studio-panel-menu" : undefined} aria-label="面板设置" title="显示或隐藏面板" onClick={() => setPanelMenuOpen(open => !open)}><StudioIcon name="columns" /></button>
-                {panelMenuOpen && <div id="studio-panel-menu" className="studio-panel-menu">
+                {panelMenuOpen && <div id="studio-panel-menu" className="studio-panel-menu" role="group" aria-label="面板可见性">
                   <strong>显示 / 隐藏面板</strong>
                   {Object.entries(studioPanels).map(([id, label]) => <label key={id}><input type="checkbox" checked={panelVisibility[id as StudioPanel] && (id !== "commands" || !agentOpen)} onChange={event => {
                     changePanel(id as StudioPanel, event.target.checked);
@@ -3250,11 +3271,15 @@ export default function CadDemo() {
                 </div>}
               </div>
             </div>
+            {preparationDisplay && <div className="preparation-preview-banner" role="group" aria-label="修复快照预览">
+              <strong role="status">只读修复快照 · 全部几何（含隐藏体）</strong>
+              <button type="button" onClick={() => handlePreparationPreview(null)}>退出预览，返回工程</button>
+            </div>}
           </div>
           <section className="viewport-panel">
             <SourceRecoveryBanner onBlocked={setSourceRecoveryBlocked} onOpen={()=>{setSourcePanelView('restores');setActiveOperation('sources');}} onReload={async()=>{if(!await restoreOrCreateModel())throw Error('工程尚未成功载入，请先核对后台状态。');}}/>
             <ProjectLoadStatus documentId={controllerState.documentId} active={!sourceRecoveryBlocked&&(!model || commandBusy&&controllerState.pendingOperation==='document.view')}/>
-            <div ref={mountRef} className="viewport" tabIndex={0} aria-label="3D 视口" data-testid="cad-viewport" data-projection={projection} data-display-mode={displayMode} onKeyDown={(event) => {
+            <div ref={mountRef} id="cad-viewport" className="viewport" tabIndex={0} aria-label="3D 视口" data-testid="cad-viewport" data-projection={projection} data-display-mode={displayMode} onKeyDown={(event) => {
               if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
               event.preventDefault();
               if (!dragModeling || dragStage === "idle") setContextMenu({ left: 12, top: 12 });
@@ -3269,9 +3294,8 @@ export default function CadDemo() {
               {(["X", "Y", "Z"] as const).map(axis => <g key={axis} className={`axis-${axis.toLowerCase()}`}><line x1="34" y1="34" /><text>{axis}</text></g>)}
               <circle cx="34" cy="34" r="3" />
             </svg>
-            {preparationDisplay&&<div className="preparation-preview-banner" role="status" aria-label="修复快照预览"><strong>只读修复快照 · 全部几何（含隐藏体）</strong><button type="button" onClick={()=>handlePreparationPreview(null)}>退出预览，返回工程</button></div>}
             {selectionRect && <div className="selection-marquee" style={{ left: selectionRect.left, top: selectionRect.top, width: selectionRect.width, height: selectionRect.height }} aria-hidden="true" />}
-            <div className="selection-readout" data-testid="selection-readout"><strong>几何体 {model?.bodyCount ?? 0}</strong><small>面 {model?.stats?.faceCount ?? 0}　边 {model?.stats?.edgeCount ?? 0}</small><span>{selectionMode === "body" ? "体" : selectionMode === "face" ? "面" : "边"}拾取 · {selectedBodyIds.length > 1 ? `${selectedBodyIds.length} 个 Body` : selectedId ?? "未选择"}</span></div>
+            <div className="selection-readout" data-testid="selection-readout" data-picked={Boolean(selectedId || selectedBodyIds.length)}><strong>几何体 {model?.bodyCount ?? 0}</strong><small>面 {model?.stats?.faceCount ?? 0}　边 {model?.stats?.edgeCount ?? 0}</small><span>{selectionMode === "body" ? "体" : selectionMode === "face" ? "面" : "边"}拾取 · {selectedBodyIds.length > 1 ? `${selectedBodyIds.length} 个 Body` : selectedId ?? "未选择"}</span></div>
             {propertySelectionCount.total>0&&<div className="property-selection-readout" role="status" aria-label="属性集合定位"><span>属性关联 · {propertySelectionCount.total} 项 / {propertySelectionCount.visible} 项可见</span><button type="button" onClick={clearHighlight}>清除集合高亮</button></div>}
             {qualitySelection&&<div className="quality-selection-readout" role="status" aria-label="单元定位">
               <div><strong>{qualitySelection.spatial?`空间重叠 · A ${qualitySelection.cell.elementId} ↔ B ${qualitySelection.spatial.peer.elementId}`:`${qualitySelection.topology?meshTopologyLabels[qualitySelection.topology.kind]:'网格单元'} · ${qualitySelection.cell.elementId}`}</strong>
@@ -3338,44 +3362,49 @@ export default function CadDemo() {
         </aside>
       </section>
 
-      {projectSwitch && <WorkbenchDialog key="project-switch" title="当前工程有未保存的更改" busy={busy} onCancel={() => setProjectSwitch(null)}>
+      {commandSearchOpen && <CommandSearch availability={commandAvailability}
+        onClose={() => setCommandSearchOpen(false)} onRun={id => { setCommandSearchOpen(false); void handleCommand(id); }} />}
+      {projectSwitch && <WorkbenchDialog key="project-switch" title="当前工程有未保存的更改" busy={busy} onCancel={() => setProjectSwitch(null)} actions={<>
+        <button data-initial-focus type="button" onClick={() => setProjectSwitch(null)}>取消</button>
+        <button type="button" onClick={() => {
+          setProjectSwitch(null);
+          void runProjectSwitch(projectSwitch);
+        }}>直接切换</button>
+        <button type="button" className="dialog-primary" onClick={() => {
+          switchAfterSave.current = projectSwitch;
+          setProjectSwitch(null);
+          void saveProjectFromMenu();
+        }}>保存后切换</button>
+      </>}>
         <p>继续{projectSwitch.label}前，可以先生成当前工程的备份。</p>
-        <div className="exchange-actions">
-          <button type="button" disabled={busy} onClick={() => {
-            switchAfterSave.current = projectSwitch;
-            setProjectSwitch(null);
-            void saveProjectFromMenu();
-          }}>保存后切换</button>
-          <button type="button" disabled={busy} onClick={() => {
-            setProjectSwitch(null);
-            void runProjectSwitch(projectSwitch);
-          }}>直接切换</button>
-          <button data-initial-focus type="button" disabled={busy} onClick={() => setProjectSwitch(null)}>取消</button>
-        </div>
+        <p>选择「直接切换」不会为当前更改生成新的备份文件。</p>
       </WorkbenchDialog>}
       {saveNamePrompt && <WorkbenchDialog key="project-save-name" title={saveNamePrompt.copy ? "另存为" : "保存前命名工程"} busy={busy} onCancel={() => {
         switchAfterSave.current = null;
         setSaveNamePrompt(null);
-      }}>
-        <form className="panel-section" onSubmit={event => { event.preventDefault(); void saveProjectFromMenu(saveName, saveNamePrompt.copy); }}>
-          <label className="single-field"><span>工程名称</span><input data-initial-focus required maxLength={120} value={saveName} onChange={event => setSaveName(event.target.value)} disabled={busy} /></label>
-          {saveNameError && <p className="property-error" role="alert">{saveNameError}</p>}
-          <div className="exchange-actions"><button type="submit" disabled={busy || saveNamePrompt.documentId !== controllerState.documentId || !saveName.trim() || saveName.trim() === "未命名工程"}>{saveNamePrompt.copy ? "下载副本" : "命名并保存"}</button><button type="button" disabled={busy} onClick={() => { switchAfterSave.current = null; setSaveNamePrompt(null); }}>取消</button></div>
+      }} actions={<>
+        <button type="button" onClick={() => { switchAfterSave.current = null; setSaveNamePrompt(null); }}>取消</button>
+        <button className="dialog-primary" type="submit" form="project-save-name-form" disabled={saveNamePrompt.documentId !== controllerState.documentId || !saveName.trim() || saveName.trim() === "未命名工程"}>{saveNamePrompt.copy ? "下载副本" : "命名并保存"}</button>
+      </>}>
+        <form id="project-save-name-form" onSubmit={event => { event.preventDefault(); if (!busy) void saveProjectFromMenu(saveName, saveNamePrompt.copy); }}>
+          <label className="single-field"><span>工程名称</span><input data-initial-focus required maxLength={120} value={saveName} onChange={event => { setSaveName(event.target.value); setSaveNameError(null); }} aria-invalid={!!saveNameError} aria-describedby={saveNameError ? "project-save-name-error" : "project-save-name-hint"} disabled={busy} /></label>
+          {saveNameError
+            ? <p id="project-save-name-error" className="property-error" role="alert">{saveNameError}</p>
+            : <p id="project-save-name-hint">{saveNamePrompt.copy ? "副本名称不会修改当前工程名称。" : "保存时将用此名称生成备份文件。"}</p>}
         </form>
       </WorkbenchDialog>}
-      {deleteConfirmation && <WorkbenchDialog key="delete-confirmation" title={deleteConfirmation.title} busy={commandBusy} onCancel={() => setDeleteConfirmation(null)}>
+      {deleteConfirmation && <WorkbenchDialog key="delete-confirmation" title={deleteConfirmation.title} busy={commandBusy} onCancel={() => setDeleteConfirmation(null)} actions={<>
+        <button data-initial-focus type="button" onClick={() => setDeleteConfirmation(null)}>取消</button>
+        <button className="feature-delete-confirm" type="button" onClick={() => {
+          setDeleteConfirmation(null);
+          if (!ownsDocumentState(deleteConfirmation) || modelingController.hasPendingMutation()) {
+            setError("工程状态已变化，请重新选择要删除的对象。");
+            return;
+          }
+          void deleteConfirmation.run();
+        }}>确认删除</button>
+      </>}>
         <p>{deleteConfirmation.description}</p>
-        <div className="exchange-actions">
-          <button className="feature-delete-confirm" type="button" disabled={commandBusy} onClick={() => {
-            setDeleteConfirmation(null);
-            if (!ownsDocumentState(deleteConfirmation) || modelingController.hasPendingMutation()) {
-              setError("工程状态已变化，请重新选择要删除的对象。");
-              return;
-            }
-            void deleteConfirmation.run();
-          }}>确认删除</button>
-          <button data-initial-focus type="button" onClick={() => setDeleteConfirmation(null)}>取消</button>
-        </div>
       </WorkbenchDialog>}
       <footer className="status-bar">
         <span className={`ready-state${commandError && !commandBusy ? " failed" : ""}`}><i />{commandBusy ? "处理中" : commandError ? "操作未完成" : model ? "就绪" : "等待模型"}</span><span>选择: {activeSelection ?? "无"}</span>
